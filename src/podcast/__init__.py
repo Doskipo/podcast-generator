@@ -1,2 +1,1 @@
-def main() -> None:
-    print("Hello from podcast!")
+"""Personal podcast generator: fetch -> rank -> script -> tts -> stitch."""

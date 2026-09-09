@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+<channel>
+  <title>Test Feed</title>
+  <link>https://example.com/</link>
+  <description>Fixture feed for fetch stage tests</description>
+  <item>
+    <title>Fresh Article One</title>
+    <link>https://example.com/articles/fresh-one</link>
+    <pubDate>{fresh_1}</pubDate>
+    <description>Summary of fresh article one.</description>
+  </item>
+  <item>
+    <title>Fresh Article One</title>
+    <link>https://example.com/articles/fresh-one?utm_source=newsletter</link>
+    <pubDate>{fresh_1}</pubDate>
+    <description>Same article, syndicated with tracking params — should be deduped.</description>
+  </item>
+  <item>
+    <title>Stale Article</title>
+    <link>https://example.com/articles/stale</link>
+    <pubDate>{stale}</pubDate>
+    <description>Outside the fetch window — should be dropped.</description>
+  </item>
+  <item>
+    <title>Fresh Article Two</title>
+    <link>https://example.com/articles/fresh-two</link>
+    <pubDate>{fresh_2}</pubDate>
+    <description>Summary of fresh article two.</description>
+  </item>
+</channel>
+</rss>
