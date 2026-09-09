@@ -1,0 +1,19 @@
+name: Eudald
+interests:
+  - topic: mechanistic interpretability
+    weight: 1.0
+  - topic: dynamical systems in machine learning
+    weight: 0.8
+  - topic: ML theory and generalisation
+    weight: 0.7
+  - topic: AI industry news
+    weight: 0.4
+feeds:
+  - https://rss.arxiv.org/rss/cs.LG
+  - https://rss.arxiv.org/rss/cs.AI
+  - https://hnrss.org/frontpage
+  - https://www.alignmentforum.org/feed.xml
+podcast:
+  duration_minutes: 8
+  hosts: [Nova, Max]
+  tone: curious, precise, no hype
