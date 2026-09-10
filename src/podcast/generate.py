@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 
 from podcast.models import Episode, FetchOutput, Profile, ScriptOutput
 from podcast.paths import episode_dir
-from podcast.stages.fetch import fetch_stage
+from podcast.stages.fetch import ensure_interest_queries, fetch_stage
 from podcast.stages.script import script_stage
 from podcast.stages.stitch import stitch_stage
 from podcast.stages.tts import tts_stage
@@ -38,6 +38,8 @@ def _run_tts_and_stitch(episode: Episode, script_output: ScriptOutput) -> None:
 
 def run(profile_path: str, episode_id: str | None = None) -> str:
     profile = Profile.from_yaml(profile_path)
+    if ensure_interest_queries(profile, profile_path):
+        print(f"cached generated search queries into {profile_path}")
     episode_id = episode_id or _new_episode_id()
 
     manifest_path = episode_dir(episode_id) / "episode.json"

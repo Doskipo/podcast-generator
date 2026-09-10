@@ -1,6 +1,6 @@
-"""Smoke tests for the fetch stage. No network: feedparser.parse and
-trafilatura.fetch_url are monkeypatched onto local fixtures; trafilatura.extract
-runs for real against the fixture HTML.
+"""Smoke tests for the fetch stage. No network: fetch_module._download_feed and
+trafilatura.fetch_url are monkeypatched onto local fixtures; feedparser.parse
+and trafilatura.extract run for real against the fixture content.
 """
 
 from __future__ import annotations
@@ -9,9 +9,14 @@ from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 from pathlib import Path
 
-import feedparser
-
-from podcast.models import FetchSettings, Interest, PodcastSettings, Profile
+from podcast.models import (
+    DEFAULT_CURATED_WINDOW_HOURS,
+    DEFAULT_SEARCH_WINDOW_HOURS,
+    FetchSettings,
+    Interest,
+    PodcastSettings,
+    Profile,
+)
 from podcast.stages import fetch as fetch_module
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -20,8 +25,9 @@ FIXTURES = Path(__file__).parent / "fixtures"
 def _profile(**fetch_overrides) -> Profile:
     return Profile(
         name="Test",
-        interests=[Interest(topic="testing", weight=1.0)],
-        feeds=["https://example.com/feed.xml"],
+        interests=[
+            Interest(topic="testing", weight=1.0, feeds=["https://example.com/feed.xml"]),
+        ],
         podcast=PodcastSettings(duration_minutes=8, hosts=["Nova", "Max"], tone="curious"),
         fetch=FetchSettings(**fetch_overrides) if fetch_overrides else FetchSettings(),
     )
@@ -58,8 +64,7 @@ def _patch_extraction(monkeypatch) -> None:
 
 def test_fetch_stage_filters_dedupes_and_extracts(tmp_path, monkeypatch):
     feed_path = _write_feed_fixture(tmp_path)
-    real_parse = feedparser.parse
-    monkeypatch.setattr(fetch_module.feedparser, "parse", lambda url: real_parse(str(feed_path)))
+    monkeypatch.setattr(fetch_module, "_download_feed", lambda url: feed_path.read_text(encoding="utf-8"))
     _patch_extraction(monkeypatch)
     _patch_episode_dir(monkeypatch, tmp_path)
 
@@ -79,8 +84,7 @@ def test_fetch_stage_filters_dedupes_and_extracts(tmp_path, monkeypatch):
 
 def test_fetch_stage_caps_entries_per_feed(tmp_path, monkeypatch):
     feed_path = _write_feed_fixture(tmp_path)
-    real_parse = feedparser.parse
-    monkeypatch.setattr(fetch_module.feedparser, "parse", lambda url: real_parse(str(feed_path)))
+    monkeypatch.setattr(fetch_module, "_download_feed", lambda url: feed_path.read_text(encoding="utf-8"))
     _patch_extraction(monkeypatch)
     _patch_episode_dir(monkeypatch, tmp_path)
 
@@ -93,14 +97,13 @@ def test_fetch_stage_caps_entries_per_feed(tmp_path, monkeypatch):
 
 def test_fetch_stage_skips_failing_feed(tmp_path, monkeypatch):
     feed_path = _write_feed_fixture(tmp_path)
-    real_parse = feedparser.parse
 
-    def fake_parse(url: str):
+    def fake_download(url: str) -> str:
         if "bad" in url:
             raise RuntimeError("connection refused")
-        return real_parse(str(feed_path))
+        return feed_path.read_text(encoding="utf-8")
 
-    monkeypatch.setattr(fetch_module.feedparser, "parse", fake_parse)
+    monkeypatch.setattr(fetch_module, "_download_feed", fake_download)
     _patch_extraction(monkeypatch)
     _patch_episode_dir(monkeypatch, tmp_path)
 
@@ -111,3 +114,179 @@ def test_fetch_stage_skips_failing_feed(tmp_path, monkeypatch):
 
     # the good feed's articles still come through despite the bad feed erroring
     assert {a.title for a in output.articles} == {"Fresh Article One", "Fresh Article Two"}
+
+
+def test_fetch_stage_builds_search_feed_for_uncurated_interest(tmp_path, monkeypatch):
+    feed_path = _write_feed_fixture(tmp_path)
+
+    # A distinct feed (different titles/links than feed_sample.xml) standing
+    # in for what a real Bing News search would return, so its article isn't
+    # deduped away against the curated feed's identical fixture content.
+    search_feed_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel>
+<item>
+  <title>Search Result Alpha</title>
+  <link>https://news.example.com/articles/search-alpha</link>
+  <pubDate>{pub_date}</pubDate>
+  <description>Found via search.</description>
+</item>
+</channel></rss>""".format(pub_date=format_datetime(datetime.now(timezone.utc) - timedelta(hours=1)))
+
+    requested_urls: list[str] = []
+
+    def fake_download(url: str) -> str:
+        requested_urls.append(url)
+        return search_feed_xml if "bing.com" in url else feed_path.read_text(encoding="utf-8")
+
+    monkeypatch.setattr(fetch_module, "_download_feed", fake_download)
+    _patch_extraction(monkeypatch)
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    profile = Profile(
+        name="Test",
+        interests=[
+            Interest(topic="testing", weight=1.0, feeds=["https://example.com/feed.xml"]),
+            Interest(topic="space exploration", weight=1.0),
+        ],
+        podcast=PodcastSettings(duration_minutes=8, hosts=["Nova", "Max"], tone="curious"),
+    )
+
+    output = fetch_module.fetch_stage(profile, episode_id="ep4")
+
+    # the uncurated interest got a generated Bing News search feed for its topic
+    assert any("bing.com" in url and "space+exploration" in url for url in requested_urls)
+
+    by_title = {a.title: a.source for a in output.articles}
+    assert by_title["Search Result Alpha"] == fetch_module.SOURCE_SEARCH
+    assert by_title["Fresh Article One"] == fetch_module.SOURCE_CURATED
+
+
+def test_normalize_url_keeps_redirect_wrapper_query_but_strips_tracking():
+    # A redirect wrapper (e.g. Bing's apiclick.aspx) encodes the only thing
+    # that makes the link distinct entirely in its query string — collapsing
+    # the whole query would falsely dedupe every wrapped link together.
+    wrapped_one = "http://www.bing.com/news/apiclick.aspx?ref=FexRss&url=https%3a%2f%2fa.example.com%2fone"
+    wrapped_two = "http://www.bing.com/news/apiclick.aspx?ref=FexRss&url=https%3a%2f%2fb.example.com%2ftwo"
+    assert fetch_module._normalize_url(wrapped_one) != fetch_module._normalize_url(wrapped_two)
+
+    # Known tracking params on an otherwise-identical URL still collapse together.
+    plain = "https://example.com/articles/fresh-one"
+    tracked = "https://example.com/articles/fresh-one?utm_source=newsletter"
+    assert fetch_module._normalize_url(plain) == fetch_module._normalize_url(tracked)
+
+
+def test_interest_effective_window_hours_defaults():
+    curated = Interest(topic="x", weight=1.0, feeds=["https://example.com/feed.xml"])
+    search = Interest(topic="y", weight=1.0)
+    overridden = Interest(topic="z", weight=1.0, window_hours=24)
+
+    assert curated.effective_window_hours == DEFAULT_CURATED_WINDOW_HOURS
+    assert search.effective_window_hours == DEFAULT_SEARCH_WINDOW_HOURS
+    assert overridden.effective_window_hours == 24
+
+
+def test_fetch_stage_uses_multiple_queries_and_dedupes(tmp_path, monkeypatch):
+    now = datetime.now(timezone.utc)
+
+    def item(title: str, link: str, hours_ago: int) -> str:
+        pub = format_datetime(now - timedelta(hours=hours_ago))
+        return f"<item><title>{title}</title><link>{link}</link><pubDate>{pub}</pubDate><description>d</description></item>"
+
+    # Two feeds share "Shared Story" (same link) — dedupe should collapse it,
+    # keeping the two feeds' unique stories.
+    feed_a = f"""<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel>
+{item("Comp Story", "https://news.example.com/comp", 1)}
+{item("Shared Story", "https://news.example.com/shared", 1)}
+</channel></rss>"""
+    feed_b = f"""<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel>
+{item("Shared Story", "https://news.example.com/shared", 2)}
+{item("Record Story", "https://news.example.com/record", 1)}
+</channel></rss>"""
+
+    requested_urls: list[str] = []
+
+    def fake_download(url: str) -> str:
+        requested_urls.append(url)
+        if "calisthenics+competition" in url:
+            return feed_a
+        if "calisthenics+world+record" in url:
+            return feed_b
+        raise AssertionError(f"unexpected feed url: {url}")
+
+    monkeypatch.setattr(fetch_module, "_download_feed", fake_download)
+    _patch_extraction(monkeypatch)
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    profile = Profile(
+        name="Test",
+        interests=[
+            Interest(
+                topic="calisthenics",
+                weight=1.0,
+                queries=["calisthenics competition", "calisthenics world record"],
+            ),
+        ],
+        podcast=PodcastSettings(duration_minutes=8, hosts=["Nova", "Max"], tone="curious"),
+    )
+
+    output = fetch_module.fetch_stage(profile, episode_id="ep5")
+
+    assert len(requested_urls) == 2  # one Bing feed fetched per query
+    titles = sorted(a.title for a in output.articles)
+    assert titles == ["Comp Story", "Record Story", "Shared Story"]
+    assert all(a.source == fetch_module.SOURCE_SEARCH for a in output.articles)
+
+
+def test_ensure_interest_queries_generates_and_caches(tmp_path, monkeypatch):
+    profile_path = tmp_path / "profile.yaml"
+    profile = Profile(
+        name="Test",
+        interests=[
+            Interest(topic="testing", weight=1.0, feeds=["https://example.com/feed.xml"]),
+            Interest(topic="calisthenics", weight=1.0),
+        ],
+        podcast=PodcastSettings(duration_minutes=8, hosts=["Nova", "Max"], tone="curious"),
+    )
+    profile.to_yaml(profile_path)
+
+    calls: list[str] = []
+
+    def fake_generate(client, model, topic):
+        calls.append(topic)
+        return [f"{topic} q1", f"{topic} q2", f"{topic} q3"]
+
+    monkeypatch.setattr(fetch_module, "_generate_queries", fake_generate)
+
+    changed = fetch_module.ensure_interest_queries(profile, profile_path, client=object())
+    assert changed is True
+    assert calls == ["calisthenics"]  # curated interest never needs generation
+    assert profile.interests[1].queries == ["calisthenics q1", "calisthenics q2", "calisthenics q3"]
+
+    # cached to disk: reloading sees the queries without another LLM call
+    reloaded = Profile.from_yaml(profile_path)
+    assert reloaded.interests[1].queries == ["calisthenics q1", "calisthenics q2", "calisthenics q3"]
+
+    calls.clear()
+    changed_again = fetch_module.ensure_interest_queries(reloaded, profile_path, client=object())
+    assert changed_again is False
+    assert calls == []  # already cached — one call per profile, not per run
+
+
+def test_ensure_interest_queries_skips_when_nothing_to_generate(tmp_path, monkeypatch):
+    # No OPENAI_API_KEY needed at all when every interest is either curated or
+    # already has cached queries — proves the client is never constructed.
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    profile_path = tmp_path / "profile.yaml"
+    profile = Profile(
+        name="Test",
+        interests=[
+            Interest(topic="testing", weight=1.0, feeds=["https://example.com/feed.xml"]),
+            Interest(topic="already cached", weight=1.0, queries=["already cached news"]),
+        ],
+        podcast=PodcastSettings(duration_minutes=8, hosts=["Nova", "Max"], tone="curious"),
+    )
+
+    changed = fetch_module.ensure_interest_queries(profile, profile_path)
+
+    assert changed is False
+    assert not profile_path.exists()  # nothing changed, so nothing was written

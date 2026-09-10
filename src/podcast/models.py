@@ -9,9 +9,36 @@ import yaml
 from pydantic import BaseModel, Field, HttpUrl
 
 
+# Per-interest freshness window defaults: curated feeds (arXiv, a chosen blog's
+# RSS, ...) publish daily, so a short window keeps things current. Interests
+# discovered via news search skew toward older explainer/reference content for
+# anything but high-volume topics, so they get a longer window by default —
+# see docs/decisions.md ("Per-interest freshness window") for the reasoning.
+DEFAULT_CURATED_WINDOW_HOURS = 48
+DEFAULT_SEARCH_WINDOW_HOURS = 168
+
+
 class Interest(BaseModel):
     topic: str
     weight: float = Field(ge=0.0, le=1.0)
+    feeds: list[HttpUrl] = Field(default_factory=list)  # curated feeds; empty means "discover via search"
+    # Search queries for this interest, used only when `feeds` is empty. None
+    # means "not generated yet" — the fetch stage generates
+    # NUM_GENERATED_QUERIES event-shaped queries with one LLM call and caches
+    # them here (persisted back to the profile's YAML file), so it's one call
+    # per profile, not per run.
+    queries: list[str] | None = None
+    window_hours: int | None = None  # override; default depends on curated vs. search, see below
+
+    @property
+    def is_curated(self) -> bool:
+        return bool(self.feeds)
+
+    @property
+    def effective_window_hours(self) -> int:
+        if self.window_hours is not None:
+            return self.window_hours
+        return DEFAULT_CURATED_WINDOW_HOURS if self.is_curated else DEFAULT_SEARCH_WINDOW_HOURS
 
 
 class PodcastSettings(BaseModel):
@@ -23,7 +50,6 @@ class PodcastSettings(BaseModel):
 class FetchSettings(BaseModel):
     """Knobs for the fetch stage. Overridable per profile, sane defaults otherwise."""
 
-    window_hours: int = 48
     max_entries_per_feed: int = 30
 
 
@@ -51,7 +77,7 @@ class TTSSettings(BaseModel):
 class Profile(BaseModel):
     name: str
     interests: list[Interest]
-    feeds: list[HttpUrl]
+    feeds: list[HttpUrl] = Field(default_factory=list)  # optional extras, layered on top of interests' feeds
     podcast: PodcastSettings
     fetch: FetchSettings = Field(default_factory=FetchSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
@@ -61,6 +87,14 @@ class Profile(BaseModel):
     def from_yaml(cls, path: str | Path) -> Profile:
         data = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
         return cls.model_validate(data)
+
+    def to_yaml(self, path: str | Path) -> None:
+        """Serialize back to YAML — used to cache generated interest queries
+        into the profile's source file. Round-trips through the model, so
+        hand-written comments/formatting in the original file are not
+        preserved."""
+        data = self.model_dump(mode="json", exclude_none=True, exclude_defaults=True)
+        Path(path).write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
 
 class Article(BaseModel):
@@ -72,6 +106,11 @@ class Article(BaseModel):
     fetched_at: datetime
     summary: str | None = None
     text: str  # full text extracted by trafilatura; article is dropped upstream if this is unavailable
+    # "curated" (an explicit feed URL, interest-level or top-level extra) or
+    # "<provider>_search" (a feed generated from an interest's query). Defaults
+    # to "curated" so pre-existing persisted articles.json files (from before
+    # this field existed) still validate via --from-articles.
+    source: str = "curated"
 
 
 class Episode(BaseModel):
@@ -87,8 +126,14 @@ class FetchOutput(BaseModel):
 
     episode_id: str
     fetched_at: datetime
-    window_hours: int
     articles: list[Article]
+
+
+class QueryList(BaseModel):
+    """Structured-output shape for the cheap LLM call that turns an interest's
+    topic into event-shaped search queries (see fetch.py:_generate_queries)."""
+
+    queries: list[str]
 
 
 class Line(BaseModel):

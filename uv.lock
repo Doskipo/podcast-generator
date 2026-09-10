@@ -608,6 +608,7 @@ source = { editable = "." }
 dependencies = [
     { name = "elevenlabs" },
     { name = "feedparser" },
+    { name = "httpx" },
     { name = "openai" },
     { name = "pydantic" },
     { name = "pydub" },
@@ -625,6 +626,7 @@ dev = [
 requires-dist = [
     { name = "elevenlabs", specifier = ">=2.67.0" },
     { name = "feedparser", specifier = ">=6.0.14" },
+    { name = "httpx", specifier = ">=0.28.1" },
     { name = "openai", specifier = ">=3.10.0" },
     { name = "pydantic", specifier = ">=2.13.5" },
     { name = "pydub", specifier = ">=0.25.1" },

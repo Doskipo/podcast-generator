@@ -54,7 +54,6 @@ def _fetch_output(episode_id: str, articles: list[Article]) -> FetchOutput:
     return FetchOutput(
         episode_id=episode_id,
         fetched_at=datetime.now(timezone.utc),
-        window_hours=48,
         articles=articles,
     )
 
