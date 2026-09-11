@@ -1,7 +1,9 @@
-"""Fetch stage: pull RSS feeds, extract full text, dedupe, keep a recent window.
+"""Fetch stage: pull RSS feeds, dedupe, keep a recent window — metadata only.
 
 Typed input: Profile (+ episode_id). Typed output: FetchOutput, persisted as
-data/episodes/<episode_id>/articles.json.
+data/episodes/<episode_id>/articles.json. Full-text extraction happens later,
+in the rank stage, only for the candidates selected there — see
+docs/decisions.md ("Rank stage") for why extraction moved out of this stage.
 """
 
 from __future__ import annotations
@@ -15,7 +17,6 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import feedparser
 import httpx
-import trafilatura
 from openai import OpenAI
 
 from podcast.env import require_env
@@ -29,10 +30,6 @@ from podcast.models import (
 from podcast.paths import episode_dir
 
 logger = logging.getLogger(__name__)
-
-# Below this many extracted characters we treat the extraction as failed rather
-# than risk grounding the script in a near-empty article.
-MIN_EXTRACTED_CHARS = 200
 
 # feedparser.parse(url) does its own fetch via urllib, which on Windows uses
 # the system cert store instead of certifi and fails TLS verification against
@@ -61,24 +58,25 @@ def _build_search_feed_url(query: str) -> str:
     return "https://www.bing.com/news/search?" + urlencode({"q": query, "format": "RSS"})
 
 
-def _feed_plan(profile: Profile) -> list[tuple[str, str, int]]:
-    """Return (feed_url, source, window_hours) triples: each interest's curated
-    feeds if it has any (one triple per feed), else one generated search feed
-    per query for that interest; plus every top-level profile.feeds entry as
-    an extra curated feed. Dedup across all of it happens later, in
-    fetch_stage, the same way regardless of how a feed_url was produced."""
-    plan: list[tuple[str, str, int]] = []
+def _feed_plan(profile: Profile) -> list[tuple[str, str, int, str | None]]:
+    """Return (feed_url, source, window_hours, interest_topic) tuples: each
+    interest's curated feeds if it has any (one tuple per feed), else one
+    generated search feed per query for that interest; plus every top-level
+    profile.feeds entry as an extra curated feed with no interest (None).
+    Dedup across all of it happens later, in fetch_stage, the same way
+    regardless of how a feed_url was produced."""
+    plan: list[tuple[str, str, int, str | None]] = []
     for interest in profile.interests:
         window_hours = interest.effective_window_hours
         if interest.is_curated:
-            plan.extend((str(feed), SOURCE_CURATED, window_hours) for feed in interest.feeds)
+            plan.extend((str(feed), SOURCE_CURATED, window_hours, interest.topic) for feed in interest.feeds)
         else:
             # Queries should already be cached by ensure_interest_queries; falling
             # back to the bare topic as a single query keeps this usable even if
             # that step was skipped (e.g. calling fetch_stage directly in tests).
             queries = interest.queries or [interest.topic]
-            plan.extend((_build_search_feed_url(q), SOURCE_SEARCH, window_hours) for q in queries)
-    plan.extend((str(feed), SOURCE_CURATED, DEFAULT_CURATED_WINDOW_HOURS) for feed in profile.feeds)
+            plan.extend((_build_search_feed_url(q), SOURCE_SEARCH, window_hours, interest.topic) for q in queries)
+    plan.extend((str(feed), SOURCE_CURATED, DEFAULT_CURATED_WINDOW_HOURS, None) for feed in profile.feeds)
     return plan
 
 
@@ -180,7 +178,9 @@ def _download_feed(url: str) -> str:
     return response.text
 
 
-def _candidates_for_feed(feed_url: str, now: datetime, window_hours: int, max_entries: int, source: str) -> list[dict]:
+def _candidates_for_feed(
+    feed_url: str, now: datetime, window_hours: int, max_entries: int, source: str, interest_topic: str | None
+) -> list[dict]:
     """Parse one feed and return recent, capped candidates (newest first). Never raises."""
     cutoff = now - timedelta(hours=window_hours)
     try:
@@ -218,29 +218,10 @@ def _candidates_for_feed(feed_url: str, now: datetime, window_hours: int, max_en
                 "published_at": published_at,
                 "summary": entry.get("summary"),
                 "source": source,
+                "interest": interest_topic,
             }
         )
     return candidates
-
-
-def _extract_article(candidate: dict) -> Article | None:
-    downloaded = trafilatura.fetch_url(candidate["url"])
-    text = trafilatura.extract(downloaded) if downloaded else None
-    if not text or len(text) < MIN_EXTRACTED_CHARS:
-        logger.warning("skipping article %s: extraction failed or too short", candidate["url"])
-        return None
-
-    return Article(
-        source_id=_source_id(candidate["url"]),
-        url=candidate["url"],
-        title=candidate["title"],
-        feed_url=candidate["feed_url"],
-        published_at=candidate["published_at"],
-        fetched_at=datetime.now(timezone.utc),
-        summary=candidate["summary"],
-        text=text,
-        source=candidate["source"],
-    )
 
 
 def fetch_stage(profile: Profile, episode_id: str) -> FetchOutput:
@@ -250,9 +231,9 @@ def fetch_stage(profile: Profile, episode_id: str) -> FetchOutput:
     seen_titles: set[str] = set()
     candidates: list[dict] = []
 
-    for feed_url, source, window_hours in _feed_plan(profile):
+    for feed_url, source, window_hours, interest_topic in _feed_plan(profile):
         for candidate in _candidates_for_feed(
-            feed_url, now, window_hours, profile.fetch.max_entries_per_feed, source
+            feed_url, now, window_hours, profile.fetch.max_entries_per_feed, source, interest_topic
         ):
             norm_url = _normalize_url(candidate["url"])
             norm_title = _normalize_title(candidate["title"])
@@ -262,9 +243,22 @@ def fetch_stage(profile: Profile, episode_id: str) -> FetchOutput:
             seen_titles.add(norm_title)
             candidates.append(candidate)
 
-    # Full-text extraction is the expensive/networked step, so it runs last,
-    # only on the deduped, in-window, capped candidate list.
-    articles = [a for c in candidates if (a := _extract_article(c)) is not None]
+    # No full-text extraction here — that's the expensive/networked step, and
+    # it now runs in the rank stage, only for the candidates selected there.
+    articles = [
+        Article(
+            source_id=_source_id(c["url"]),
+            url=c["url"],
+            title=c["title"],
+            feed_url=c["feed_url"],
+            published_at=c["published_at"],
+            fetched_at=now,
+            summary=c["summary"],
+            source=c["source"],
+            interest=c["interest"],
+        )
+        for c in candidates
+    ]
 
     output = FetchOutput(
         episode_id=episode_id,

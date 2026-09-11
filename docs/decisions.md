@@ -305,3 +305,129 @@ respecting always the time to speak... not human-like.
 - Dedup bug: stripping all query params collapsed every Bing redirect link into one URL.
   Caught because article counts didn't add up; fixed with a tracking-param denylist and a
   regression test. Lesson: normalisation must be provider-aware.
+
+## Rank stage — 2026-09-11
+- **Why per-interest selection, not a single global top-k.** Flagged in the Day 2 notes:
+  article volume across interests is wildly imbalanced (60 arXiv vs 9 everything else for
+  the real profile), so a plain global ranking by score alone would produce an all-arXiv
+  episode regardless of `Interest.weight`. `rank_stage` instead buckets fetched candidates
+  by `Article.interest`, computes a total story budget from `duration_minutes` (roughly one
+  story per 1.5 minutes, `MINUTES_PER_STORY` in `rank.py`), and splits that budget across
+  interests proportional to `weight` via the largest-remainder method (floor each interest's
+  share, hand the leftover slots to the largest fractional remainders, so allocations sum
+  exactly to the budget). Only *after* per-interest selection is the chosen set ordered
+  globally, by `score × weight` — that ordering is for presentation, selection itself never
+  compares scores across interests directly. Two known simplifications, left for later:
+  no cross-interest redistribution when an interest has fewer candidates than its budget
+  (e.g. an interest with 0 in-window articles just contributes nothing, rather than freeing
+  its slots for other interests), and no backfill when a selected candidate fails extraction
+  (see below) — it's simply dropped rather than replaced by the next-best scored candidate
+  for that interest.
+- **Why extraction moved out of fetch.** Fetch used to run trafilatura on every deduped,
+  in-window candidate — for the real `eudald.yaml` profile that's 69 extractions (69 network
+  fetches + parses) even though an 8-minute episode only ever uses ~5 articles. `Article.text`
+  is now `str | None`, unset by fetch; `rank_stage` extracts full text only for the
+  candidates it actually selects, after scoring and budgeting, reusing the same "drop if
+  extraction fails or under `MIN_EXTRACTED_CHARS` (200) chars" rule fetch used to apply
+  (moved verbatim into `rank.py:_extract_text`). This is the single biggest cost/latency win
+  in this change: roughly a 90%+ cut in extraction work for a typical profile, for zero loss
+  in what ends up in the episode.
+- **Article now carries `interest: str | None`** — the `Interest.topic` a candidate was
+  discovered for (fetch sets this per `_feed_plan` entry), `None` for top-level `profile.feeds`
+  extras which aren't tied to any one interest. Rank buckets those extras under a synthetic
+  `"_extra"` pseudo-interest, weighted as the mean of the real interests' weights (0.5 if
+  there are none), so they still participate in budgeting/ordering without needing a real
+  `Interest.weight` to borrow. `profiles/eudald.yaml` has no top-level feeds today, so this
+  path is exercised only in tests — flagging in case it matters once a profile actually uses
+  `feeds:` again.
+- **The scoring call.** One structured-output OpenAI call per batch of up to `BATCH_SIZE`
+  (20) candidates — title + summary only, never full text, since candidates aren't extracted
+  yet at this point. Batches are chunked across *all* fetched candidates together rather than
+  per interest (each candidate's line in the prompt names its own interest, e.g.
+  `[id] (interest: interpretability) title — summary`), so small interests share a batch
+  instead of each paying for a nearly-empty call of their own. For the real profile (69
+  candidates) that's ceil(69/20) = 4 calls per run. Cost is genuinely cheap: per batch,
+  ~20 short candidate lines plus a short system prompt is on the order of a few hundred to
+  ~1,000 input tokens, and the structured output (20 scores + one-line reasons) is a few
+  hundred output tokens; at gpt-4o-mini list pricing that's well under a cent per batch, so
+  ~4 batches puts a full run's scoring cost at a fraction of a cent — an order-of-magnitude
+  estimate, not a measured bill, but confirms "cheap" as intended. Isolated behind
+  `rank.py:_score_batch(client, model, batch)`, the same seam pattern as
+  `_generate_script`/`_generate_queries`, so tests monkeypatch it directly and never hit the
+  network. A candidate the model doesn't return a score for gets a defensive
+  `score=0.0, reason="not scored"` rather than crashing the stage.
+- **`ranked.json`** persists every scored candidate (`scored`, with `score`/`reason`/`selected`
+  and `text` populated only when selected) plus the final chosen subset in global order
+  (`selected`) — the audit trail the task asked for, and what `--from-ranked` resumes from.
+- **`script_stage` needed no changes.** It already just reads `Article.text` off whatever
+  `FetchOutput` it's handed; `generate.py` now builds that `FetchOutput` from
+  `RankOutput.selected` (via a small `_script_fetch_output` helper shared by `run`,
+  `run_from_articles`, and the new `run_from_ranked`) instead of from the raw fetch output.
+  `--from-articles` now re-runs rank too (fetch's output has no text to hand straight to
+  script anymore); the new `--from-ranked` is the resume point that used to be
+  `--from-articles`'s job.
+
+## Rank stage backfill + redirects + description rubric — 2026-09-11
+- **Backfill.** The two "known simplifications" flagged above (no backfill, no
+  cross-interest redistribution) turned out to matter immediately: the first real run kept
+  only 2 of a budget of 5 because 2 of the other 3 picks failed extraction outright. `rank.py`
+  now walks each interest's candidates in score order (`_select_bucket`) and keeps trying
+  the next-best-scored one until `k` are actually selected or the interest runs out of
+  candidates — a failure (redirect resolution error, extraction failure, or an unextractable
+  domain, see below) no longer shrinks that interest's selection, it just costs one extra
+  attempt. `RankOutput.backfilled` counts how many selected articles ended up outside the
+  original top-k window (i.e. only selected because something ahead of them failed) —
+  logged via `logger.info` when nonzero and echoed in `generate.py`'s rank summary line.
+  Cross-interest redistribution (giving an empty interest's slots to another interest) is
+  still not implemented — a different kind of gap (no candidates at all, not a failure to
+  extract one) — and is still flagged for later.
+- **Redirect resolution.** Bing's `apiclick.aspx` wrapper was the single biggest cause of
+  extraction failures in the first real run (a 403, since trafilatura's own fetch doesn't
+  send a browser User-Agent and some publishers reject non-browser clients on the wrapped
+  link). `rank.py:_resolve_and_download` now does that resolution itself, with `httpx`,
+  `follow_redirects=True`, a real Chrome User-Agent, and a 15s timeout — in the same request
+  that downloads the page body, so there's no separate trafilatura fetch afterward, just
+  `trafilatura.extract()` on the html already in hand. The resolved landing URL is persisted
+  as `Article.final_url` on every candidate extraction was *attempted* for (selected or not,
+  succeeded or not) — `None` for candidates never attempted, `None` for candidates whose
+  resolution itself failed outright. This is what makes the msn.com check below possible: we
+  need to know where a link actually landed, not just its Bing-wrapped starting URL.
+- **msn.com treated as unextractable.** The second real-run failure was an MSN page that
+  resolved fine but trafilatura pulled nothing usable from (JS-rendered chrome around the
+  real article). Rather than spend a trafilatura call finding that out every time,
+  `_is_unextractable` checks `final_url`'s host against `UNEXTRACTABLE_DOMAINS` (`msn.com`
+  today) and fails the candidate immediately — same backfill path as any other failure. This
+  is a narrow, evidence-based denylist (one domain, seen failing twice), not a general
+  aggregator detector; revisit if another domain shows the same pattern.
+- **Interest.description + scoring rubric.** `Interest` gained an optional free-text
+  `description`, passed to the scorer alongside the topic (`[id] (interest: topic —
+  description) title — summary`) so relevance is judged against what the user actually means
+  by the interest, not just a bare keyword match on the topic string. The scoring prompt now
+  states an explicit rubric (1.0 squarely on-topic per the description, 0.7 clearly related,
+  0.4 tangential, 0.0 unrelated) instead of leaving "relevance" undefined, and requires the
+  one-line reason to name the specific concept in the candidate's title that justifies the
+  score — makes `ranked.json`'s `reason` field spot-check-able against the title without
+  opening the source. Not enforced in code (an LLM reliably naming a concept isn't something
+  a cheap validator can check), so this is a prompt contract, not a guarantee.
+- **New failure mode found on this re-run, not yet fixed: cross-interest reason bleed within
+  a mixed batch.** All 4 League of Legends esports candidates and the 1 music candidate came
+  back `score=0.0, reason="Unrelated to mathematics of machine learning or any relevant
+  concepts."` — copy-pasted from the tail end of the same batch's mathematics-of-ML scoring
+  (which itself was correct and well-differentiated: 1.0/1.0/1.0/0.7/0.7/0.4 with distinct,
+  on-topic reasons). The model appears to lose track of per-item interest context toward the
+  end of a batch that mixes several interests, defaulting to the last "real" reasoning it
+  produced instead of actually scoring the remaining items. Consequence: the LoL pick that
+  backfilled into this run's selection did so essentially arbitrarily (all 4 candidates tied
+  at the same wrong 0.0), not because it was genuinely the next-best. This directly undermines
+  the "flatten across interests, not per interest" batching choice made when the scoring call
+  was first built ("Rank stage" → "The scoring call") — that choice optimized for fewer/
+  cheaper calls but didn't account for this. Not fixed here (out of scope for this pass); the
+  likely fix is one of: chunk batches per-interest instead of flattened, or add an `interest`
+  echo field to `ArticleScore`'s structured-output schema so a mismatch against the id's
+  actual interest can be detected and the candidate re-scored/dropped instead of trusted
+  blindly.
+
+
+
+## For day 4 - UI
+- The user types "interpretability"; at save time the backend already makes one LLM call to generate the queries, so the same call can draft a one-line description ("mechanistic interpretability of neural networks: circuits, features, probes, sparse autoencoders") which the UI shows for one-click accept or edit. Zero effort for the lazy user, precision for the careful one.

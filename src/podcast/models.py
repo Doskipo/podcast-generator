@@ -21,6 +21,11 @@ DEFAULT_SEARCH_WINDOW_HOURS = 168
 class Interest(BaseModel):
     topic: str
     weight: float = Field(ge=0.0, le=1.0)
+    # Free-text elaboration on what this interest actually means to the user
+    # (scope, angle, what counts as relevant) — passed to the rank stage's
+    # scorer alongside the topic so it can judge relevance against more than
+    # a bare keyword. None is fine; the topic alone still scores.
+    description: str | None = None
     feeds: list[HttpUrl] = Field(default_factory=list)  # curated feeds; empty means "discover via search"
     # Search queries for this interest, used only when `feeds` is empty. None
     # means "not generated yet" — the fetch stage generates
@@ -105,12 +110,25 @@ class Article(BaseModel):
     published_at: datetime
     fetched_at: datetime
     summary: str | None = None
-    text: str  # full text extracted by trafilatura; article is dropped upstream if this is unavailable
+    # Full text, extracted by trafilatura in the rank stage — only for
+    # candidates selected there. None until then (or if extraction failed and
+    # the candidate was dropped from the selection). See docs/decisions.md
+    # ("Rank stage") for why extraction moved out of fetch.
+    text: str | None = None
+    # The URL trafilatura actually fetched, after following redirects (e.g.
+    # Bing's apiclick.aspx wrapper) — set by the rank stage for every
+    # candidate it attempts extraction on, whether or not that attempt
+    # succeeds. None for candidates extraction was never attempted for.
+    final_url: str | None = None
     # "curated" (an explicit feed URL, interest-level or top-level extra) or
     # "<provider>_search" (a feed generated from an interest's query). Defaults
     # to "curated" so pre-existing persisted articles.json files (from before
     # this field existed) still validate via --from-articles.
     source: str = "curated"
+    # The Interest.topic this candidate was discovered for; None for
+    # candidates from top-level profile.feeds extras, which aren't tied to
+    # any single interest. Lets the rank stage group/budget per interest.
+    interest: str | None = None
 
 
 class Episode(BaseModel):
@@ -134,6 +152,46 @@ class QueryList(BaseModel):
     topic into event-shaped search queries (see fetch.py:_generate_queries)."""
 
     queries: list[str]
+
+
+class ArticleScore(BaseModel):
+    """One article's relevance score, from the rank stage's batch scoring
+    call (see rank.py:_score_batch)."""
+
+    source_id: str
+    score: float = Field(ge=0.0, le=1.0)
+    reason: str  # one line
+
+
+class ScoreBatch(BaseModel):
+    """Structured-output shape for one batch scoring call — up to
+    rank.BATCH_SIZE articles' worth of scores at a time."""
+
+    scores: list[ArticleScore]
+
+
+class RankedArticle(BaseModel):
+    """One scored candidate, whether or not it ended up selected. `article`
+    carries extracted `text` only when `selected` is True — extraction only
+    runs for the chosen subset."""
+
+    article: Article
+    interest: str | None  # the Interest.topic (or None) this candidate was scored against
+    score: float
+    reason: str
+    selected: bool
+
+
+class RankOutput(BaseModel):
+    """Typed output of the rank stage, persisted as ranked.json."""
+
+    episode_id: str
+    ranked_at: datetime
+    model: str
+    total_budget: int
+    backfilled: int  # selected candidates that weren't in the original per-interest top-k
+    scored: list[RankedArticle]  # every candidate that was scored, for audit
+    selected: list[Article]  # the chosen subset, text extracted, in global order
 
 
 class Line(BaseModel):

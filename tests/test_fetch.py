@@ -1,6 +1,7 @@
-"""Smoke tests for the fetch stage. No network: fetch_module._download_feed and
-trafilatura.fetch_url are monkeypatched onto local fixtures; feedparser.parse
-and trafilatura.extract run for real against the fixture content.
+"""Smoke tests for the fetch stage. No network: fetch_module._download_feed is
+monkeypatched onto local fixtures; feedparser.parse runs for real against the
+fixture content. Fetch no longer does full-text extraction (that moved to the
+rank stage — see tests/test_rank.py), so there's nothing to patch for it here.
 """
 
 from __future__ import annotations
@@ -57,15 +58,9 @@ def _patch_episode_dir(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(fetch_module, "episode_dir", _episode_dir)
 
 
-def _patch_extraction(monkeypatch) -> None:
-    html = (FIXTURES / "article_sample.html").read_text(encoding="utf-8")
-    monkeypatch.setattr(fetch_module.trafilatura, "fetch_url", lambda url: html)
-
-
-def test_fetch_stage_filters_dedupes_and_extracts(tmp_path, monkeypatch):
+def test_fetch_stage_filters_and_dedupes(tmp_path, monkeypatch):
     feed_path = _write_feed_fixture(tmp_path)
     monkeypatch.setattr(fetch_module, "_download_feed", lambda url: feed_path.read_text(encoding="utf-8"))
-    _patch_extraction(monkeypatch)
     _patch_episode_dir(monkeypatch, tmp_path)
 
     output = fetch_module.fetch_stage(_profile(), episode_id="ep1")
@@ -74,18 +69,20 @@ def test_fetch_stage_filters_dedupes_and_extracts(tmp_path, monkeypatch):
     titles = sorted(a.title for a in output.articles)
     assert titles == ["Fresh Article One", "Fresh Article Two"]
 
-    # persisted, re-parseable, and every article carries a grounding source_id + text
+    # persisted, re-parseable, every article carries a grounding source_id, is
+    # tagged with the interest it was found for, and has no text yet — full
+    # text extraction is the rank stage's job now, only for what it selects.
     articles_path = tmp_path / "episodes" / "ep1" / "articles.json"
     assert articles_path.exists()
     for article in output.articles:
         assert len(article.source_id) == 8
-        assert len(article.text) >= fetch_module.MIN_EXTRACTED_CHARS
+        assert article.text is None
+        assert article.interest == "testing"
 
 
 def test_fetch_stage_caps_entries_per_feed(tmp_path, monkeypatch):
     feed_path = _write_feed_fixture(tmp_path)
     monkeypatch.setattr(fetch_module, "_download_feed", lambda url: feed_path.read_text(encoding="utf-8"))
-    _patch_extraction(monkeypatch)
     _patch_episode_dir(monkeypatch, tmp_path)
 
     output = fetch_module.fetch_stage(_profile(max_entries_per_feed=1), episode_id="ep2")
@@ -104,7 +101,6 @@ def test_fetch_stage_skips_failing_feed(tmp_path, monkeypatch):
         return feed_path.read_text(encoding="utf-8")
 
     monkeypatch.setattr(fetch_module, "_download_feed", fake_download)
-    _patch_extraction(monkeypatch)
     _patch_episode_dir(monkeypatch, tmp_path)
 
     profile = _profile()
@@ -114,6 +110,10 @@ def test_fetch_stage_skips_failing_feed(tmp_path, monkeypatch):
 
     # the good feed's articles still come through despite the bad feed erroring
     assert {a.title for a in output.articles} == {"Fresh Article One", "Fresh Article Two"}
+
+    # the bad feed is a top-level profile.feeds extra, not tied to any interest
+    by_title = {a.title: a.interest for a in output.articles}
+    assert by_title["Fresh Article One"] == "testing"
 
 
 def test_fetch_stage_builds_search_feed_for_uncurated_interest(tmp_path, monkeypatch):
@@ -139,7 +139,6 @@ def test_fetch_stage_builds_search_feed_for_uncurated_interest(tmp_path, monkeyp
         return search_feed_xml if "bing.com" in url else feed_path.read_text(encoding="utf-8")
 
     monkeypatch.setattr(fetch_module, "_download_feed", fake_download)
-    _patch_extraction(monkeypatch)
     _patch_episode_dir(monkeypatch, tmp_path)
 
     profile = Profile(
@@ -159,6 +158,11 @@ def test_fetch_stage_builds_search_feed_for_uncurated_interest(tmp_path, monkeyp
     by_title = {a.title: a.source for a in output.articles}
     assert by_title["Search Result Alpha"] == fetch_module.SOURCE_SEARCH
     assert by_title["Fresh Article One"] == fetch_module.SOURCE_CURATED
+
+    # each article is tagged with the interest that discovered it
+    by_title_interest = {a.title: a.interest for a in output.articles}
+    assert by_title_interest["Search Result Alpha"] == "space exploration"
+    assert by_title_interest["Fresh Article One"] == "testing"
 
 
 def test_normalize_url_keeps_redirect_wrapper_query_but_strips_tracking():
@@ -214,7 +218,6 @@ def test_fetch_stage_uses_multiple_queries_and_dedupes(tmp_path, monkeypatch):
         raise AssertionError(f"unexpected feed url: {url}")
 
     monkeypatch.setattr(fetch_module, "_download_feed", fake_download)
-    _patch_extraction(monkeypatch)
     _patch_episode_dir(monkeypatch, tmp_path)
 
     profile = Profile(

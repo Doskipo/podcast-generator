@@ -1,6 +1,6 @@
 name: Eudald
 interests:
-- topic: interpretability
+- topic: mehcanistic interpretability in llms
   weight: 1.0
   feeds:
   - https://rss.arxiv.org/rss/cs.LG
@@ -31,7 +31,26 @@ interests:
   - Olivia Dean Sienna Spiro collaboration
 podcast:
   duration_minutes: 8
+  listener:
+    name: Eudald
   hosts:
-  - Nova
-  - Max
+    - name: Alice
+      voice_id: ...
+      persona: |
+        (your text, multi-line)
+      home_turf: [music, esports storylines]
+    - name: Bob
+      voice_id: ...
+      persona: |
+        ...
+      home_turf: [mathematics, training mechanics, game systems]
+  recurring_bits:
+    - name: The logistical pin-drop
+      description: ...
+      max_per_episode: 2
+  style:
+    humour: 2        # 0-3
+    depth: 2         # 1-3
+    tangents: true
+    banter: true
   tone: curious, precise, no hype
