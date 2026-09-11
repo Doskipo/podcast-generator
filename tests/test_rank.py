@@ -80,13 +80,21 @@ def _patch_resolve_fails(monkeypatch) -> None:
 
 def _scorer(scores_by_id: dict[str, float]) -> callable:
     """A fake _score_batch that scores each article from a fixed mapping,
-    defaulting to 0.5 for anything not listed."""
+    defaulting to 0.5 for anything not listed, and correctly echoes the
+    interest label it was given (so these tests aren't exercising the
+    echo-mismatch path incidentally)."""
 
-    def fake_score_batch(client, model, model_batch):
+    def fake_score_batch(client, model, interest_topic, description, batch):
+        label = interest_topic or "general"
         return ScoreBatch(
             scores=[
-                ArticleScore(source_id=a.source_id, score=scores_by_id.get(a.source_id, 0.5), reason="fixture")
-                for a, _topic, _description in model_batch
+                ArticleScore(
+                    source_id=a.source_id,
+                    interest=label,
+                    score=scores_by_id.get(a.source_id, 0.5),
+                    reason="fixture",
+                )
+                for a in batch
             ]
         )
 
@@ -318,17 +326,83 @@ def test_score_articles_includes_interest_description(monkeypatch):
     descriptions = {"space": "rocket launches and orbital missions"}
     captured = {}
 
-    def fake_score_batch(client, model, model_batch):
-        captured["batch"] = model_batch
-        return ScoreBatch(scores=[ArticleScore(source_id="a1", score=0.9, reason="mentions a rocket launch")])
+    def fake_score_batch(client, model, interest_topic, description, batch):
+        captured["interest_topic"] = interest_topic
+        captured["description"] = description
+        return ScoreBatch(
+            scores=[ArticleScore(source_id="a1", interest=interest_topic, score=0.9, reason="mentions a rocket launch")]
+        )
 
     monkeypatch.setattr(rank_module, "_score_batch", fake_score_batch)
 
     rank_module._score_articles(client=object(), model="m", articles=articles, descriptions=descriptions)
 
-    (_article_arg, topic, description) = captured["batch"][0]
-    assert topic == "space"
-    assert description == "rocket launches and orbital missions"
+    assert captured["interest_topic"] == "space"
+    assert captured["description"] == "rocket launches and orbital missions"
+
+
+def test_score_articles_never_mixes_interests_in_one_batch(monkeypatch):
+    articles = [_article(f"a{i}", "alpha") for i in range(3)] + [_article(f"b{i}", "beta") for i in range(3)]
+    descriptions = {"alpha": None, "beta": None}
+    seen_batches: list[tuple[str | None, set[str]]] = []
+
+    def fake_score_batch(client, model, interest_topic, description, batch):
+        seen_batches.append((interest_topic, {a.source_id for a in batch}))
+        return ScoreBatch(
+            scores=[
+                ArticleScore(source_id=a.source_id, interest=interest_topic, score=0.5, reason="fixture")
+                for a in batch
+            ]
+        )
+
+    monkeypatch.setattr(rank_module, "_score_batch", fake_score_batch)
+
+    rank_module._score_articles(client=object(), model="m", articles=articles, descriptions=descriptions)
+
+    # every call's batch is entirely one interest's articles — never a mix
+    for _interest_topic, ids in seen_batches:
+        assert ids <= {f"a{i}" for i in range(3)} or ids <= {f"b{i}" for i in range(3)}
+    assert {topic for topic, _ids in seen_batches} == {"alpha", "beta"}
+
+
+def test_score_articles_rejects_and_rescores_mismatched_echo(monkeypatch):
+    articles = [_article("a1", "alpha")]
+    descriptions = {"alpha": None}
+    calls: list[int] = []
+
+    def fake_score_batch(client, model, interest_topic, description, batch):
+        calls.append(len(batch))
+        if len(calls) == 1:
+            # first attempt: echoes the wrong interest — must be rejected
+            return ScoreBatch(scores=[ArticleScore(source_id="a1", interest="beta", score=0.9, reason="wrong")])
+        # retry: echoes correctly this time
+        return ScoreBatch(scores=[ArticleScore(source_id="a1", interest="alpha", score=0.8, reason="right")])
+
+    monkeypatch.setattr(rank_module, "_score_batch", fake_score_batch)
+
+    scores = rank_module._score_articles(client=object(), model="m", articles=articles, descriptions=descriptions)
+
+    assert len(calls) == 2  # rejected once, re-scored once
+    assert scores["a1"].score == 0.8
+    assert scores["a1"].reason == "right"
+
+
+def test_score_articles_falls_back_after_persistent_echo_mismatch(monkeypatch):
+    articles = [_article("a1", "alpha")]
+    descriptions = {"alpha": None}
+
+    def fake_score_batch(client, model, interest_topic, description, batch):
+        # always echoes the wrong interest, even on retry
+        return ScoreBatch(scores=[ArticleScore(source_id="a1", interest="beta", score=0.9, reason="wrong")])
+
+    monkeypatch.setattr(rank_module, "_score_batch", fake_score_batch)
+
+    scores = rank_module._score_articles(client=object(), model="m", articles=articles, descriptions=descriptions)
+
+    # gives up after MAX_SCORE_ATTEMPTS rather than trusting a score that
+    # never proved it was scored against the right interest
+    assert scores["a1"].score == 0.0
+    assert scores["a1"].reason == "interest echo mismatch"
 
 
 def test_total_budget_derived_from_duration():

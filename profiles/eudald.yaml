@@ -1,6 +1,6 @@
 name: Eudald
 interests:
-- topic: mehcanistic interpretability in llms
+- topic: mechanistic interpretability in llms
   weight: 1.0
   feeds:
   - https://rss.arxiv.org/rss/cs.LG
@@ -11,24 +11,24 @@ interests:
   - machine learning mathematics breakthroughs
   - mathematics in AI research
   - latest developments in machine learning algorithms
-- topic: calisthenics
+- topic: calisthenics and its benefits
   weight: 0.6
   queries:
-  - calisthenics competition results
+  - calisthenics most famous tricks
   - new calisthenics training techniques
-  - calisthenics event schedule
+  - why is calisthenics so beneficial for our health, specially to the articulations
 - topic: League of Legends esports
   weight: 0.5
   queries:
   - League of Legends esports tournament results
   - League of Legends esports roster changes
   - League of Legends esports world championship news
-- topic: Olivia Dean and Sienna Spiro new music
+- topic: Olivia Dean singer
   weight: 0.5
   queries:
+  - Why the rise of Olivia Dean so sudden?
   - Olivia Dean new single release
-  - Sienna Spiro music video
-  - Olivia Dean Sienna Spiro collaboration
+  - Olivia Dean collaboration with?
 podcast:
   duration_minutes: 8
   listener:

@@ -40,10 +40,15 @@ logger = logging.getLogger(__name__)
 # threshold fetch.py used to apply before extraction moved here.
 MIN_EXTRACTED_CHARS = 200
 
-# Articles per scoring call. Flattened across all interests (not chunked per
-# interest) so small interests share a call instead of each paying for its
-# own — fewer, cheaper calls for the same total candidate count.
+# Articles per scoring call, chunked *within* one interest — a call never
+# mixes interests (see docs/decisions.md, "per-interest batching + echo
+# validation": mixing them let the model lose track of which interest it was
+# scoring partway through a batch and repeat a previous item's reasoning).
 BATCH_SIZE = 20
+
+# Initial score attempt + one retry for any item whose echoed `interest`
+# doesn't match what it was actually scored against.
+MAX_SCORE_ATTEMPTS = 2
 
 # Roughly one story per 1.5 minutes of episode — the total selection budget.
 MINUTES_PER_STORY = 1.5
@@ -69,20 +74,21 @@ REDIRECT_USER_AGENT = (
 UNEXTRACTABLE_DOMAINS = {"msn.com"}
 
 
-def _render_candidate(article: Article, interest_topic: str | None, interest_description: str | None) -> str:
+def _render_candidate(article: Article) -> str:
     summary = article.summary or "(no summary)"
-    topic_label = interest_topic or "general"
-    if interest_description:
-        topic_label = f"{topic_label} — {interest_description}"
-    return f"[{article.source_id}] (interest: {topic_label}) {article.title} — {summary}"
+    return f"[{article.source_id}] {article.title} — {summary}"
 
 
 def _score_batch(
-    client: OpenAI, model: str, model_batch: list[tuple[Article, str | None, str | None]]
+    client: OpenAI, model: str, interest_topic: str | None, interest_description: str | None, batch: list[Article]
 ) -> ScoreBatch:
-    """Boundary around the OpenAI call — the seam tests monkeypatch."""
-    known_ids = ", ".join(a.source_id for a, _topic, _description in model_batch)
-    candidates_block = "\n".join(_render_candidate(a, topic, description) for a, topic, description in model_batch)
+    """Boundary around the OpenAI call — the seam tests monkeypatch. Every
+    article in `batch` belongs to the same interest; a call never mixes
+    interests (see docs/decisions.md)."""
+    label = interest_topic or "general"
+    description_line = f"Description: {interest_description}\n" if interest_description else ""
+    known_ids = ", ".join(a.source_id for a in batch)
+    candidates_block = "\n".join(_render_candidate(a) for a in batch)
 
     completion = client.chat.completions.parse(
         model=model,
@@ -90,16 +96,23 @@ def _score_batch(
             {
                 "role": "system",
                 "content": (
-                    "You score how relevant each news/paper candidate is to the interest "
-                    "it was found for. Use this rubric:\n"
+                    "You score how relevant each candidate below is to a single interest:\n"
+                    f"Interest: {label}\n"
+                    f"{description_line}"
+                    "Use this rubric:\n"
                     "  1.0 = squarely about the topic as described\n"
                     "  0.7 = clearly related to the topic\n"
                     "  0.4 = tangential to the topic\n"
                     "  0.0 = unrelated to the topic\n"
-                    "When an interest has a description (after the em dash), judge relevance "
-                    "against that description, not just the topic name. Your one-line reason "
-                    "must name the specific concept in the candidate's title that justifies "
-                    "the score.\n"
+                    "Be strict: most candidates are not a great fit for the interest they were "
+                    "found under, so most scores should land below 0.7 — reserve 0.7 and above "
+                    "for candidates you're genuinely confident belong.\n"
+                    "Your one-line reason must name a specific concept from the candidate's "
+                    "title or summary. Only return a score at all if that concept actually "
+                    "appears in the title or summary you were given — never credit a candidate "
+                    "for a connection that isn't stated in the text you can see.\n"
+                    f'Echo back exactly "{label}" in every result\'s `interest` field — this is '
+                    "a consistency check, not a judgment call.\n"
                     f"Score every one of these ids exactly once: {known_ids}"
                 ),
             },
@@ -114,28 +127,75 @@ def _chunks(items: list, size: int) -> list[list]:
     return [items[i : i + size] for i in range(0, len(items), size)]
 
 
-def _score_articles(
-    client: OpenAI, model: str, articles: list[Article], descriptions: dict[str, str | None]
+def _score_batch_with_validation(
+    client: OpenAI, model: str, interest_topic: str | None, description: str | None, batch: list[Article]
 ) -> dict[str, ArticleScore]:
-    """Score every article, chunked into batches of BATCH_SIZE. Any id the
-    model doesn't return a score for gets a defensive 0.0/"not scored" entry
-    rather than crashing the stage."""
-    known_ids = {a.source_id for a in articles}
-    scores: dict[str, ArticleScore] = {}
+    """Score `batch` (all one interest), rejecting and re-scoring any item
+    whose echoed `interest` doesn't match what it was actually scored
+    against. An item that still mismatches after MAX_SCORE_ATTEMPTS gets a
+    defensive fallback rather than a silently wrong score."""
+    expected_label = interest_topic or "general"
+    known_ids = {a.source_id for a in batch}
+    results: dict[str, ArticleScore] = {}
+    remaining = batch
 
-    for batch in _chunks(articles, BATCH_SIZE):
-        model_batch = [(a, a.interest, descriptions.get(a.interest)) for a in batch]
-        result = _score_batch(client, model, model_batch)
-        for score in result.scores:
+    for _attempt in range(MAX_SCORE_ATTEMPTS):
+        if not remaining:
+            break
+        response = _score_batch(client, model, interest_topic, description, remaining)
+        mismatched_ids: set[str] = set()
+        for score in response.scores:
             if score.source_id not in known_ids:
                 logger.warning("scorer returned unknown source_id %r, ignoring", score.source_id)
                 continue
-            scores[score.source_id] = score
+            if score.interest != expected_label:
+                logger.warning(
+                    "candidate %s echoed interest %r, expected %r — rejecting and re-scoring",
+                    score.source_id,
+                    score.interest,
+                    expected_label,
+                )
+                mismatched_ids.add(score.source_id)
+                continue
+            results[score.source_id] = score
+        remaining = [a for a in remaining if a.source_id in mismatched_ids]
+
+    for article in remaining:
+        logger.warning(
+            "candidate %s still had a mismatched interest echo after retrying, defaulting to 0.0",
+            article.source_id,
+        )
+        results[article.source_id] = ArticleScore(
+            source_id=article.source_id, interest=expected_label, score=0.0, reason="interest echo mismatch"
+        )
+
+    return results
+
+
+def _score_articles(
+    client: OpenAI, model: str, articles: list[Article], descriptions: dict[str, str | None]
+) -> dict[str, ArticleScore]:
+    """Score every article, batched per interest (a batch never mixes
+    interests) and chunked to BATCH_SIZE within each interest. Any id the
+    model doesn't return a score for at all — after echo-validated retries —
+    gets a defensive 0.0/"not scored" entry rather than crashing the stage."""
+    scores: dict[str, ArticleScore] = {}
+
+    by_interest: dict[str | None, list[Article]] = {}
+    for article in articles:
+        by_interest.setdefault(article.interest, []).append(article)
+
+    for interest_topic, interest_articles in by_interest.items():
+        description = descriptions.get(interest_topic)
+        for batch in _chunks(interest_articles, BATCH_SIZE):
+            scores.update(_score_batch_with_validation(client, model, interest_topic, description, batch))
 
     for article in articles:
         if article.source_id not in scores:
             logger.warning("scorer never returned a score for %s, defaulting to 0.0", article.source_id)
-            scores[article.source_id] = ArticleScore(source_id=article.source_id, score=0.0, reason="not scored")
+            scores[article.source_id] = ArticleScore(
+                source_id=article.source_id, interest=article.interest or "general", score=0.0, reason="not scored"
+            )
 
     return scores
 

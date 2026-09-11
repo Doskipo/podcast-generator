@@ -427,7 +427,37 @@ respecting always the time to speak... not human-like.
   actual interest can be detected and the candidate re-scored/dropped instead of trusted
   blindly.
 
-
-
-## For day 4 - UI
+## Per-interest batching + echo validation + stricter rubric — 2026-09-11
+- **Both fixes flagged above, implemented.** `_score_articles` now groups fetched articles by
+  `Article.interest` first and only *then* chunks to `BATCH_SIZE` — every `_score_batch` call
+  scores exactly one interest, so there's no longer a "tail of the batch" for the model to
+  drift into a previous interest's reasoning on. Cost trade-off, as expected: more calls for
+  the same candidate count (the real profile went from ~4 flattened calls to ~6 per-interest
+  ones — interpretability alone still needs 3 at `BATCH_SIZE=20`), still cheap in absolute
+  terms (a handful of cents-fractions per run), and now correctness isn't hostage to the
+  savings.
+- **`ArticleScore.interest` echo field**, required on every structured-output score. The
+  system prompt states the batch's single interest label once and tells the model to echo it
+  back verbatim per item — "a consistency check, not a judgment call." `rank.py:
+  _score_batch_with_validation` rejects any item whose echo doesn't match the expected label,
+  re-scores just the rejected items (`MAX_SCORE_ATTEMPTS = 2`: one retry), and if an item still
+  mismatches after that, falls back to `score=0.0, reason="interest echo mismatch"` rather than
+  trusting a score that never proved it was scored against the right thing. With per-interest
+  batching already in place this is now a belt-and-braces check more than the primary fix —
+  worth keeping anyway, since it also catches a model just getting a single item's context
+  confused independent of batch-mixing, and it's what makes a silent regression back to
+  cross-interest bleed visible (as a burst of rejected-and-retried warnings) instead of
+  invisible.
+- **Rubric hardened: strictness + text-grounding.** The scoring prompt now explicitly says
+  "most candidates are not a great fit... most scores should land below 0.7" (the first
+  real run handed out 1.0 quite liberally — three separate 1.0s for mathematics-of-ML alone),
+  and requires the named concept in the one-line reason to actually appear in the title or
+  summary given, not a connection the model inferred. Same caveat as the original "name the
+  concept" requirement: this is a prompt contract enforced by asking, not validated in code —
+  a cheap validator can't reliably confirm a paraphrased concept is "actually" in the text,
+  so this leans on the model rather than gating on it.
 - The user types "interpretability"; at save time the backend already makes one LLM call to generate the queries, so the same call can draft a one-line description ("mechanistic interpretability of neural networks: circuits, features, probes, sparse autoencoders") which the UI shows for one-click accept or edit. Zero effort for the lazy user, precision for the careful one.
+
+
+## Evergreen content: (leave it for later)
+- Solves the demo problem (an interest with no news this week still gets airtime). Keep news as the core, because the assignment says news, but add a second segment type: when an interest has zero fresh candidates, fetch a grounded evergreen source (the Wikipedia API is reliable and extracts cleanly) tagged source: evergreen, and the outline can turn it into a "primer" or "did you know" segment. Grounding rule still holds: the facts come from the fetched text, so no hallucinated trivia. It's maybe an hour of work; do it after the script rebuild if today allows, otherwise tomorrow morning. Log it now as a decision: "news first; evergreen fallback so every interest can appear; never ungrounded".

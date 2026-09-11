@@ -156,9 +156,13 @@ class QueryList(BaseModel):
 
 class ArticleScore(BaseModel):
     """One article's relevance score, from the rank stage's batch scoring
-    call (see rank.py:_score_batch)."""
+    call (see rank.py:_score_batch). Every batch scores exactly one interest,
+    so `interest` is the model's echo of the label it was told to score
+    against — a consistency check, not new information. rank.py rejects and
+    re-scores any item whose echo doesn't match what it was actually given."""
 
     source_id: str
+    interest: str  # echoed back from the prompt; verified against the expected label
     score: float = Field(ge=0.0, le=1.0)
     reason: str  # one line
 
