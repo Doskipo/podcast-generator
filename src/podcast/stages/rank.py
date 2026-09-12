@@ -242,8 +242,15 @@ def _resolve_and_download(url: str) -> tuple[str | None, str | None]:
             headers={"User-Agent": REDIRECT_USER_AGENT},
         )
         response.raise_for_status()
-    except httpx.HTTPError:
-        logger.warning("failed to resolve/download %s", url, exc_info=True)
+    except httpx.HTTPError as exc:
+        # One-line summary at WARNING (this is common — 403s, timeouts,
+        # dead links — not exceptional); the full traceback still goes to
+        # DEBUG for when it's actually needed.
+        error_response = getattr(exc, "response", None)
+        status = error_response.status_code if error_response is not None else None
+        final_url = str(error_response.url) if error_response is not None else url
+        logger.warning("failed to resolve/download %s: status=%s final_url=%s", url, status, final_url)
+        logger.debug("resolve/download failure detail for %s", url, exc_info=True)
         return None, None
     return str(response.url), response.text
 

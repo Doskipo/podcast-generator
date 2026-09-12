@@ -458,6 +458,217 @@ respecting always the time to speak... not human-like.
   so this leans on the model rather than gating on it.
 - The user types "interpretability"; at save time the backend already makes one LLM call to generate the queries, so the same call can draft a one-line description ("mechanistic interpretability of neural networks: circuits, features, probes, sparse autoencoders") which the UI shows for one-click accept or edit. Zero effort for the lazy user, precision for the careful one.
 
+## PodcastSettings migration — 2026-09-11
+- `PodcastSettings.hosts` is now `list[Host]` (`name`, `voice_id`, `persona`, `home_turf`), not
+  `list[str]` — a breaking schema change, matching the richer profile shape already drafted in
+  `profiles/eudald.yaml`. Added `Listener` (`name`), `RecurringBit` (`name`, `description`,
+  `max_per_episode`), and `Style` (`humour: 0-3`, `depth: 1-3`, `tangents: bool`, `banter: bool`)
+  as new `PodcastSettings` fields (`listener` and `style` required, `recurring_bits` defaults to
+  `[]` — a profile need not have one). This is exactly the schema the Day 1 diagnosis called for
+  ("no style knob... that's your product hook") and what the style/persona/listener blocks in
+  `profiles/eudald.yaml` were already anticipating.
+- **Voice ids moved onto `Host`, off `TTSSettings`.** `TTSSettings.voices: dict[speaker, voice_id]`
+  is gone; `tts_stage` now builds `{host.name: host.voice_id for host in profile.podcast.hosts}`
+  itself. Two voice-mapping mechanisms would've meant deciding which one wins on conflict for no
+  benefit — a host's voice is intrinsically part of who that host is, not a separate TTS-stage
+  concern. Same failure behavior as before: a script line whose speaker has no matching host
+  raises immediately (`ValueError`), not a silent fallback voice.
+- **`LLMSettings` gained `script_model` (default `"gpt-4o"`)**, alongside the existing `model`
+  (default `"gpt-4o-mini"`, now doing scoring/query-generation/outline/critique work). The script
+  stage's writing pass is the one place voice/persona quality is worth paying for — see "Script
+  rebuild" below.
+- **Test fallout:** every test file that constructs a `Profile` had a `PodcastSettings(...,
+  hosts=["Nova", "Max"], ...)` call that no longer validates — `hosts` needed real `Host` objects,
+  plus the new required `listener`/`style` fields. Fixed across `test_fetch.py`, `test_rank.py`,
+  `test_stitch.py`, `test_tts.py`, `test_generate.py`, and the new `test_script.py`/
+  `test_outline.py`/`test_critique.py` (a small local `_profile()`/`_podcast_settings()` helper
+  per file, matching the existing no-conftest convention). `test_ensure_interest_queries_
+  generates_and_caches` in `test_fetch.py` incidentally exercises the new nested models'
+  YAML round-trip (`Profile.to_yaml` → `Profile.from_yaml`), since it already wrote/reloaded a
+  profile file. `profiles/eudald.yaml` itself was left untouched — it already matched this target
+  shape (with placeholder `voice_id: ...`/persona text, presumably mid-draft) — and loads clean
+  against the new models (verified: `Profile.from_yaml("profiles/eudald.yaml")`).
 
-## Evergreen content: (leave it for later)
+## Script rebuild: outline → script → critique — 2026-09-11
+Rebuilt the script stage as three separate LLM steps, each its own module
+(`podcast/stages/outline.py`, `script.py`, `critique.py`) with its own persisted artefact and
+its own `--from-X` resume flag, following the Day 1 diagnosis's own plan ("outline step... →
+script step with personas and style → self-critique pass") and reading straight from the
+personas/listener/style/recurring_bits now in `profiles/eudald.yaml`.
+
+- **Why outline first.** Separates *narrative planning* (story order, angle, which host leads,
+  where a recurring bit fits) from *prose generation*. Two benefits: (1) it lets a cheap model
+  (`llm.model`, gpt-4o-mini) do the structural thinking, so the expensive model's whole budget
+  goes to voice/style quality, not figuring out story order; (2) it makes the narrative decisions
+  inspectable and independently re-runnable (`outline.json`, `--from-outline`) — iterate on which
+  stories lead and what their angle is without burning a script-writing call, and iterate on prose
+  without re-planning. Grounding is enforced here too: every story's `source_ids` must be a
+  subset of the ranked articles (`outline.py:_validate_outline`), and any `recurring_bit` name
+  must be real and stay within its `max_per_episode` — checked in code, not left to the prompt,
+  the same pattern as the original `_validate_source_ids`.
+- **Why critique as a separate pass.** A single generation pass juggling grounding rules,
+  structure, personas, *and* naturalness tends to hedge toward safe, expository writing — exactly
+  the Day 1 diagnosis ("robotic," "interview transcript," "very linear"). Asking a model to review
+  a *finished* script against three concrete failure modes (robotic / expository / breaks persona)
+  is a narrower, better-specified task than getting naturalness right on the first pass while also
+  not breaking grounding. Concretely safer too: `critique.py:_apply_critique` never asks the model
+  to regenerate the script — it deep-copies the original and splices `rewritten_text` into only
+  the flagged lines' `.text` (via `flatten_lines`, the same line order `tts_stage` synthesizes in),
+  so segments/`source_ids` are provably untouched. Grounding is re-validated on `revised_script`
+  anyway (`validate_source_ids`, against the actual known article ids, not the tautological
+  "same ids as before") — belt-and-braces, since the splice already guarantees it structurally.
+  Both `original_script` and `revised_script` are kept in `critique.json` for audit/diff. An
+  out-of-range `line_index` from the model is logged and skipped, not fatal — same defensive
+  posture as `rank.py`'s unknown-id handling.
+- **Critique uses the stronger model too**, though only told to for the script step explicitly.
+  Judging whether a line sounds robotic or breaks a specific persona is a comparable quality bar
+  to writing lines that don't — using the cheap model to grade the expensive model's prose risked
+  a weak critic missing exactly the subtlety the expensive model was hired for. Easy to override
+  per profile if this turns out to be overkill (`llm.model` for critique would still work, just
+  isn't the default).
+- **What moved where:** `podcast.stages.script:flatten_lines` (renamed from `tts.py`'s
+  `_flatten_lines`, now public since both `critique.py` and `tts.py` need the exact same line
+  order) and `validate_source_ids` (same source_ids check as before, now public so `critique.py`
+  can re-run it) both now live in `script.py`, where `Script`/`Line` conceptually belong;
+  `tts.py` imports `flatten_lines` from there instead of owning its own copy.
+- **`Line` gained `pause_ms: int | None`** — an optional pause after a line, for a natural beat
+  or reaction. Not consumed by `tts_stage` yet (ElevenLabs synthesis doesn't take a post-line
+  pause today); it's there for the script/critique steps to express the beat, and for `stitch.py`
+  to pick up later (today's fixed 400ms inter-line gap could become `pause_ms or DEFAULT_GAP_MS`)
+  — flagging as a follow-up, not done here.
+- **Resume flags:** `--from-outline` (outline.json → script → critique → tts → stitch) and
+  `--from-script` (script.json → critique → tts → stitch, re-purposed — it used to skip straight
+  to tts) as asked. Also added `--from-critique` (critique.json → tts → stitch) beyond what was
+  named explicitly — CLAUDE.md's own architecture rule is "re-running a stage must be possible
+  from the previous artefact," and leaving critique as the one stage boundary with no resume
+  point (forcing a re-paid critique call just to retry tts/voice settings) would leave a gap in
+  a pattern every other stage boundary already has. `run_from_outline`/`run_from_script` also
+  load the episode's `ranked.json` from the same directory — outline/script/critique all need
+  the selected articles' full text, which isn't in `outline.json`/`script.json` themselves.
+  `generate.py`'s `run()`/`run_from_*` functions got small `_step_X` helpers (print the summary
+  line, return `None` if `until` says stop there) so the five entrypoints chaining up to seven
+  stages don't each hand-roll the same stop-early logic.
+- **Cost per episode, in tokens (order-of-magnitude estimates for a ~5-story, 8-minute episode —
+  not measured against a live bill, and OpenAI's list pricing can change, so treat these as
+  illustrative):**
+
+  | step | model | ~input tokens | ~output tokens | ~cost |
+  |------|-------|---------------|-----------------|-------|
+  | outline | gpt-4o-mini | ~900 | ~550 | <$0.001 |
+  | script | gpt-4o | ~3,050 | ~2,100 | ~$0.03 |
+  | critique | gpt-4o | ~2,150 | ~300 | ~$0.008 |
+
+  Total ≈ **$0.04/episode** for these three steps, dominated by the script step's output tokens
+  (a full ~1,200-word episode at gpt-4o's output rate). That's roughly 15-20x what the old
+  single gpt-4o-mini script call cost (a fraction of a cent) — a deliberate trade: the whole
+  point of `script_model` is spending real money exactly where it buys quality (the actual
+  prose), while outline and critique's structural/judgment work stays on the cheap model.
+  Combined with rank's per-episode scoring cost (a few cents at most, per its own entry above),
+  a full episode's total LLM spend is still on the order of a few cents to ~$0.05 — cheap in
+  absolute terms for a personal podcast, not "per-request-cheap" the way the pre-rebuild pipeline
+  was.
+
+## Recurring bit id fix, fetch feed count fix, quieter extraction-failure logs — 2026-09-12
+- **Recurring bit mismatch.** The first real outline run failed: `_validate_outline` rejected
+  `'logistical pin-drop'` against a profile bit named `'The logistical pin-drop'` — the model
+  had paraphrased the free-text name back slightly differently (dropped "The", lowercased it).
+  Asking a model to echo a string verbatim and then string-comparing the echo was always going
+  to be fragile. Fix has two layers:
+  1. `RecurringBit` gained `id: str | None` with an `effective_id` property (explicit `id`, else
+     a slugified `name` — `_slugify` in `models.py`, same pattern as `Interest.
+     effective_window_hours`). `OutlineStory.recurring_bit` now stores this id, never the name.
+  2. `outline.py:_response_model(bit_ids)` builds a **request-specific structured-output
+     schema** (via `pydantic.create_model`) where `recurring_bit` is `Literal[tuple(bit_ids)] |
+     None` instead of a free `str | None` — verified the resulting JSON schema renders as
+     `{"anyOf": [{"const": "the-logistical-pin-drop"}, {"type": "null"}]}`, so the model
+     literally cannot return a value that isn't one of the profile's actual bit ids (or null).
+     This is different from why `source_ids` stays a free `list[str]` validated only in code
+     (docs/decisions.md, "Script stage"): `recurring_bit` is one scalar drawn from a small,
+     fixed, request-time-known set (the profile's own bits, typically a handful), so it's
+     genuinely enum-constrainable; `source_ids` is an arbitrary-length subset of a much larger,
+     also request-time-known but less boundable candidate pool — same "can't express a dynamic
+     subset in the schema" limitation as before still applies there.
+  3. `_validate_outline`'s code-level check is kept as the backstop the task asked for, just
+     re-keyed to `effective_id` instead of `name` — belt-and-braces in case the schema
+     constraint is ever bypassed (a future refactor, a non-`.parse()` code path, etc.).
+  4. `script.py:_render_outline_story` now resolves the id back to the bit's `name`/
+     `description` (`recurring_bits_by_id` lookup) before showing it to the script-writing
+     step — otherwise that step would see a bare slug instead of something to actually write
+     dialogue around, a quality regression the id switch would've caused incidentally.
+- **Fetch feed count.** `generate.py`'s summary line used `len(profile.feeds)` — the top-level
+  extras list only, which is `0` for `eudald.yaml` since every one of its feeds comes from
+  interests (`interests[].feeds` or generated/cached `queries`), not `profile.feeds`. Printed
+  "from 0 feeds" after actually querying 13. Fix: `FetchOutput` gained `feeds_count: int = 0`
+  (default so old persisted `articles.json` files still validate), set in `fetch_stage` from
+  `len(feed_plan)` — the same `_feed_plan(profile)` result the stage already iterates over, so
+  it's the real count of feed URLs queried (curated + generated/cached-query + top-level extras),
+  not a guess derived from one piece of the profile.
+- **Extraction-failure logging.** `rank.py:_resolve_and_download`'s `except httpx.HTTPError`
+  logged `exc_info=True` at WARNING — a full traceback per failure, and redirect/extraction
+  failures are common enough (403s, dead links) that this was mostly noise at the level a normal
+  run actually shows (`generate.py` sets `logging.basicConfig(level=logging.INFO)`). Now WARNING
+  gets one line — `status=<code or None> final_url=<url or the original>` — and the traceback
+  moves to a separate `logger.debug(..., exc_info=True)` call, visible only if DEBUG logging is
+  turned on. `status`/`final_url` come from `exc.response` when the error has one (an
+  `HTTPStatusError`, i.e. a real HTTP response that just wasn't 2xx) and degrade to `None`/the
+  original request url for errors below the HTTP layer (connection refused, timeout) that never
+  got a response to read from.
+
+## Script quality pass — 2026-09-12
+Five changes, all aimed at the same complaint from the first real scripts: too long-winded, too
+willing to invent, too free with the recurring bit and tangents crowding every segment.
+
+- **(1) Per-story word budget, code-computed.** `OutlineStory.word_budget: int = 0` — deliberately
+  *not* part of the LLM's structured output (an LLM summing to an exact total reliably is not a
+  bet worth making; `rank.py`'s per-interest article budgets already established doing this kind
+  of proportional allocation in code, not by asking). `outline_stage` computes it after the
+  outline call: `total_words = duration_minutes*150 - 120` (the 120 is a rough cold-open/outro
+  reserve), split across stories proportional to each story's rank score (the *average* score of
+  its `source_ids`, for the rare merged-story case) via the same largest-remainder method as
+  `rank.py:_per_bucket_budget` — falls back to an equal split if every story scored 0. `script.py`
+  shows each story's budget in the outline block and is told to land within ~20% of it.
+  Enforcement past that is a **report, not a rewrite**: `critique.py:_budget_flags` counts each
+  revised segment's actual words (deterministic, no LLM needed) against `word_budget * 1.2` and
+  records any overrun in `CritiqueOutput.over_budget_segments` — auto-shortening a segment that
+  runs long would mean either dropping content or a fourth LLM pass, neither asked for here.
+- **(2) Listener fact invention.** Took the cheaper of the two options offered: a script.py hard
+  rule ("only state something about the listener if it's explicitly given in the Listener line —
+  never invent hobbies, opinions, biography") plus a critique.py criterion
+  (`invented_listener_detail`), rather than a dedicated validation LLM call. `Listener` itself
+  stays untouched (just `name` today) — the guard scales automatically if it grows more fields
+  later, since the rule says "given in the Listener line," not "given a name." Also tightened
+  outline.py's own tangent instruction the same way, since a tangent suggested there ("from...
+  the listener's interests") was the plausible *source* of an invented detail flowing downstream
+  into dialogue — cheaper to stop it at the point it's suggested than only where it's spoken.
+- **(3) One tangent per segment, never with the bit.** `Angle.tangent` became `str | None` (was
+  required) so it can legitimately be empty. `outline.py:_validate_outline` now rejects any story
+  with both `recurring_bit` set and a non-empty `tangent` — a segment carries one or the other,
+  enforced in code as a hard constraint on the *plan*, not left to the writer to self-police.
+  "At most one" tangent didn't need separate code: `Angle` only ever had one `tangent` field to
+  begin with, so a second tangent within a segment can only come from the writing step going
+  beyond the outline — covered by a new script.py hard rule ("at most one backstory tangent... and
+  only if the outline's angle gives one") rather than a structural change.
+- **(4) 35-word line cap, split into exchanges.** Word-length checking is deterministic
+  (`len(line.text.split())`), but turning one long line into a natural back-and-forth isn't — that
+  needs the model. So the split of labor: `critique.py:_over_length_line_indices` finds every line
+  over `MAX_LINE_WORDS` (35) outside the segment carrying the recurring bit (code), and the
+  critique prompt is handed those exact indices with an instruction to flag them `too_long` and
+  split each into 2+ shorter lines (model). This required generalizing the critique's own fix
+  mechanism: `CritiqueFlag.rewritten_text: str` became `rewritten_lines: list[Line]` — usually
+  length 1 (an ordinary rewrite), but length 2+ for a split. `critique.py:_apply_critique` was
+  rewritten from a simple 1:1 splice to a rebuild that walks cold_open/each segment/outro once,
+  substituting each flagged position's *list* of replacement lines in place — later positions
+  shift naturally since the rebuild is positional, not index-arithmetic. script.py also states the
+  35-word cap as a writing-time rule, so critique is the backstop, not the primary defense.
+- **(5) "The article" phrasing.** Pure prompt rule in both script.py (writing time: "never say
+  'the article' or 'the paper' — attribute to the actual actor or call it 'the report'") and
+  critique.py (`the_article_phrasing` criterion, review time) — no code check, since judging
+  whether a claim is actually attributed to an actor vs. genuinely has none is a language-
+  understanding call, not a string match (`grep`-ing for "the article" would false-positive on a
+  line that's *correctly* calling it "the article" in a context that already named the actor).
+- **Cross-cutting: `critique_stage` gained an `outline_output` parameter** (for word budgets and
+  which segment carries the bit) and `CritiqueOutput` gained `total_words`/`over_budget_segments`.
+  `run_from_script` now also loads the episode's `outline.json` alongside `ranked.json`, since
+  critique needs both. `generate.py`'s critique summary line now reports total words and
+  over-budget segment count alongside the existing flagged-line count.
 - Solves the demo problem (an interest with no news this week still gets airtime). Keep news as the core, because the assignment says news, but add a second segment type: when an interest has zero fresh candidates, fetch a grounded evergreen source (the Wikipedia API is reliable and extracts cleanly) tagged source: evergreen, and the outline can turn it into a "primer" or "did you know" segment. Grounding rule still holds: the facts come from the fetched text, so no hallucinated trivia. It's maybe an hour of work; do it after the script rebuild if today allows, otherwise tomorrow morning. Log it now as a decision: "news first; evergreen fallback so every interest can appear; never ungrounded".

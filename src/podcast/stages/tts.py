@@ -14,19 +14,11 @@ from datetime import datetime, timezone
 from elevenlabs.client import ElevenLabs
 
 from podcast.env import require_env
-from podcast.models import Episode, Line, Script, ScriptOutput, TTSLine, TTSOutput
+from podcast.models import Episode, ScriptOutput, TTSLine, TTSOutput
 from podcast.paths import episode_dir
+from podcast.stages.script import flatten_lines
 
 logger = logging.getLogger(__name__)
-
-
-def _flatten_lines(script: Script) -> list[Line]:
-    """Cold open, then every segment's lines in order, then the outro."""
-    return [
-        *script.cold_open,
-        *(line for segment in script.segments for line in segment.lines),
-        *script.outro,
-    ]
 
 
 def _sanitize_speaker(speaker: str) -> str:
@@ -44,7 +36,8 @@ def tts_stage(episode: Episode, script_output: ScriptOutput, client: ElevenLabs 
         client = ElevenLabs(api_key=require_env("ELEVENLABS_API_KEY"))
 
     profile = episode.profile
-    lines = _flatten_lines(script_output.script)
+    lines = flatten_lines(script_output.script)
+    voice_by_speaker = {host.name: host.voice_id for host in profile.podcast.hosts}
 
     segments_dir = episode_dir(episode.episode_id) / "segments"
     segments_dir.mkdir(parents=True, exist_ok=True)
@@ -57,10 +50,11 @@ def tts_stage(episode: Episode, script_output: ScriptOutput, client: ElevenLabs 
         if file_path.exists():
             logger.info("segment %s already exists, skipping synthesis", filename)
         else:
-            voice_id = profile.tts.voices.get(line.speaker)
+            voice_id = voice_by_speaker.get(line.speaker)
             if voice_id is None:
                 raise ValueError(
-                    f"no voice configured for speaker {line.speaker!r}; add it to profile.tts.voices"
+                    f"no voice configured for speaker {line.speaker!r}; "
+                    "add a matching host to profile.podcast.hosts"
                 )
             audio_bytes = _synthesize(client, voice_id, profile.tts.model_id, line.text)
             file_path.write_bytes(audio_bytes)

@@ -231,7 +231,8 @@ def fetch_stage(profile: Profile, episode_id: str) -> FetchOutput:
     seen_titles: set[str] = set()
     candidates: list[dict] = []
 
-    for feed_url, source, window_hours, interest_topic in _feed_plan(profile):
+    feed_plan = _feed_plan(profile)
+    for feed_url, source, window_hours, interest_topic in feed_plan:
         for candidate in _candidates_for_feed(
             feed_url, now, window_hours, profile.fetch.max_entries_per_feed, source, interest_topic
         ):
@@ -263,6 +264,7 @@ def fetch_stage(profile: Profile, episode_id: str) -> FetchOutput:
     output = FetchOutput(
         episode_id=episode_id,
         fetched_at=now,
+        feeds_count=len(feed_plan),
         articles=articles,
     )
 

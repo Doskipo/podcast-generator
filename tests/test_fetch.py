@@ -14,13 +14,29 @@ from podcast.models import (
     DEFAULT_CURATED_WINDOW_HOURS,
     DEFAULT_SEARCH_WINDOW_HOURS,
     FetchSettings,
+    Host,
     Interest,
+    Listener,
     PodcastSettings,
     Profile,
+    Style,
 )
 from podcast.stages import fetch as fetch_module
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def _podcast_settings() -> PodcastSettings:
+    return PodcastSettings(
+        duration_minutes=8,
+        listener=Listener(name="Eudald"),
+        hosts=[
+            Host(name="Nova", voice_id="voice-nova", persona="Nova is curious and precise."),
+            Host(name="Max", voice_id="voice-max", persona="Max is curious and precise."),
+        ],
+        style=Style(humour=2, depth=2, tangents=True, banter=True),
+        tone="curious",
+    )
 
 
 def _profile(**fetch_overrides) -> Profile:
@@ -29,7 +45,7 @@ def _profile(**fetch_overrides) -> Profile:
         interests=[
             Interest(topic="testing", weight=1.0, feeds=["https://example.com/feed.xml"]),
         ],
-        podcast=PodcastSettings(duration_minutes=8, hosts=["Nova", "Max"], tone="curious"),
+        podcast=_podcast_settings(),
         fetch=FetchSettings(**fetch_overrides) if fetch_overrides else FetchSettings(),
     )
 
@@ -68,6 +84,10 @@ def test_fetch_stage_filters_and_dedupes(tmp_path, monkeypatch):
     # stale article dropped, duplicate (same normalized url/title) collapsed
     titles = sorted(a.title for a in output.articles)
     assert titles == ["Fresh Article One", "Fresh Article Two"]
+
+    # one curated feed, no top-level profile.feeds — feeds_count counts the
+    # feed actually queried, not len(profile.feeds) (which would be 0 here)
+    assert output.feeds_count == 1
 
     # persisted, re-parseable, every article carries a grounding source_id, is
     # tagged with the interest it was found for, and has no text yet — full
@@ -111,6 +131,12 @@ def test_fetch_stage_skips_failing_feed(tmp_path, monkeypatch):
     # the good feed's articles still come through despite the bad feed erroring
     assert {a.title for a in output.articles} == {"Fresh Article One", "Fresh Article Two"}
 
+    # both feeds were queried (one failed, but it was still attempted) — this
+    # is the case that used to print "from 0 feeds": only 1 of these 2 is a
+    # top-level profile.feeds entry, the other comes from the interest
+    assert output.feeds_count == 2
+    assert len(profile.feeds) == 1  # the old (wrong) count this replaces
+
     # the bad feed is a top-level profile.feeds extra, not tied to any interest
     by_title = {a.title: a.interest for a in output.articles}
     assert by_title["Fresh Article One"] == "testing"
@@ -147,7 +173,7 @@ def test_fetch_stage_builds_search_feed_for_uncurated_interest(tmp_path, monkeyp
             Interest(topic="testing", weight=1.0, feeds=["https://example.com/feed.xml"]),
             Interest(topic="space exploration", weight=1.0),
         ],
-        podcast=PodcastSettings(duration_minutes=8, hosts=["Nova", "Max"], tone="curious"),
+        podcast=_podcast_settings(),
     )
 
     output = fetch_module.fetch_stage(profile, episode_id="ep4")
@@ -229,7 +255,7 @@ def test_fetch_stage_uses_multiple_queries_and_dedupes(tmp_path, monkeypatch):
                 queries=["calisthenics competition", "calisthenics world record"],
             ),
         ],
-        podcast=PodcastSettings(duration_minutes=8, hosts=["Nova", "Max"], tone="curious"),
+        podcast=_podcast_settings(),
     )
 
     output = fetch_module.fetch_stage(profile, episode_id="ep5")
@@ -248,7 +274,7 @@ def test_ensure_interest_queries_generates_and_caches(tmp_path, monkeypatch):
             Interest(topic="testing", weight=1.0, feeds=["https://example.com/feed.xml"]),
             Interest(topic="calisthenics", weight=1.0),
         ],
-        podcast=PodcastSettings(duration_minutes=8, hosts=["Nova", "Max"], tone="curious"),
+        podcast=_podcast_settings(),
     )
     profile.to_yaml(profile_path)
 
@@ -286,7 +312,7 @@ def test_ensure_interest_queries_skips_when_nothing_to_generate(tmp_path, monkey
             Interest(topic="testing", weight=1.0, feeds=["https://example.com/feed.xml"]),
             Interest(topic="already cached", weight=1.0, queries=["already cached news"]),
         ],
-        podcast=PodcastSettings(duration_minutes=8, hosts=["Nova", "Max"], tone="curious"),
+        podcast=_podcast_settings(),
     )
 
     changed = fetch_module.ensure_interest_queries(profile, profile_path)

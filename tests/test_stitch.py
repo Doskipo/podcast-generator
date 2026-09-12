@@ -9,7 +9,7 @@ from pathlib import Path
 
 from pydub import AudioSegment
 
-from podcast.models import Episode, Interest, PodcastSettings, Profile, TTSLine, TTSOutput
+from podcast.models import Episode, Host, Interest, Listener, PodcastSettings, Profile, Style, TTSLine, TTSOutput
 from podcast.stages import stitch as stitch_module
 
 CLIP_MS = 50
@@ -20,7 +20,16 @@ def _profile() -> Profile:
         name="Test",
         interests=[Interest(topic="testing", weight=1.0)],
         feeds=["https://example.com/feed.xml"],
-        podcast=PodcastSettings(duration_minutes=8, hosts=["Nova", "Max"], tone="curious"),
+        podcast=PodcastSettings(
+            duration_minutes=8,
+            listener=Listener(name="Eudald"),
+            hosts=[
+                Host(name="Nova", voice_id="voice-nova", persona="Nova is curious and precise."),
+                Host(name="Max", voice_id="voice-max", persona="Max is curious and precise."),
+            ],
+            style=Style(humour=2, depth=2, tangents=True, banter=True),
+            tone="curious",
+        ),
     )
 
 

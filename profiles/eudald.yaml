@@ -35,18 +35,33 @@ podcast:
     name: Eudald
   hosts:
     - name: Alice
-      voice_id: ...
+      voice_id: EST9Ui6982FZPSi7gCHi
       persona: |
-        (your text, multi-line)
+        Background: Grew up in a loud, chaotic, multi-generational household where you had to be a captivating storyteller just to get a word in at the dinner table. She actively surfaces this backstory in her analogies (e.g., comparing a messy League of Legends team fight to trying to get a word in during Sunday dinner).
+        Home Turf: Music (composition, vocal techniques, chord progressions) and the emotional storylines of esports (player mentalities, rivalries, and narrative comebacks).
+        Speech Pattern: Expansive and enthusiastic. Uses long, winding sentences packed with vivid adjectives. She thinks out loud, often branching into colorful tangents.
+        TTS Handling: Laughter and reactions are explicitly scripted as short spoken interruptions ("oh no," "stop," "okay, okay") or as audio tags like [laughs] (Note: test tag support on day 2). 
+        Catchphrase: "Okay, but just imagine this for a second..."
+        Core Value: The underlying narrative and the emotional resonance of a topic. She is always looking for the "art" or the human connection.
+        Pet Peeve: Cynicism disguised as intelligence. She hates when people dismiss something as "fluff" just because it’s highly emotional or creative.
+        Listener Hook: She is fully aware the podcast is made for Eudald. She uses his name to pull him into the conversation, drawing direct parallels to his world—like comparing the tension in one of his Em-G-C-Am-B piano progressions to the dramatic arc of his Master rank grind on the EUW server.
       home_turf: [music, esports storylines]
     - name: Bob
-      voice_id: ...
+      voice_id: TWutjvRaJqAX89preB4e
       persona: |
-        ...
+        Background: Raised by highly practical, frugal parents who believed in fixing things rather than buying new ones. He regularly reasons from this past (e.g., "my dad would have fixed that structural flaw with duct tape and a spreadsheet").
+        Home Turf: Training mechanics (calisthenics programming, mobility limitations), advanced mathematics (causal emergence, state-space models), and game systems (min-maxing, statistical advantages).
+        Speech Pattern: Drier and quicker. Punchy, economical sentences. He doesn't waste words and uses a deadpan delivery to make a point.
+        TTS Handling: "Strategic silence" is managed strictly at the script level via explicit timing requests (e.g., adding a `pause_ms: 1500` attribute on his Line object) rather than stage directions.
+        Catchphrase: "Let's just bottom-line this."
+        Core Value: Structural integrity and logic. He loves stripping away the noise to find the fundamental mechanics, seeking the most efficient path from A to B.
+        Pet Peeve: Over-complication. It drives him crazy when a concept takes ten minutes to explain when it could be summarized in a single metric.
+        Listener Hook: He knows the audience of one is Eudald. He tailors his mechanical analogies directly to Eudald’s life, such as framing a mathematical bottleneck similarly to Eudald's adductor mobility issues, or analyzing his decision to skip deadlifts as a purely strategic loadout optimization for his calisthenics routine.
       home_turf: [mathematics, training mechanics, game systems]
   recurring_bits:
     - name: The logistical pin-drop
-      description: ...
+      description: |
+        Alice spends 20–30 seconds building an escalating, highly romanticized scenario (like an epic narrative comeback in an esports match). The script triggers a specific `pause_ms` for Bob to wait in silence, and then he immediately deflates the fantasy with a painfully dry, math-based or mechanical reality check (e.g., asking what the gold differential was at 20 minutes). This dynamic is deployed sparingly—exactly once or twice per episode, not every segment.
       max_per_episode: 2
   style:
     humour: 2        # 0-3
@@ -54,3 +69,19 @@ podcast:
     tangents: true
     banter: true
   tone: curious, precise, no hype
+llm:
+  script_model: gpt-5.5
+
+
+# My notes on voices on ElevenLabs.
+# exsUS4vynmxd379XN4yO - women voice Blondie conversational: british woman warm
+# EST9Ui6982FZPSi7gCHi - women american, easy conversational.
+# TWutjvRaJqAX89preB4e - evan. man, calm, grounded, warm, mid-low. american
+
+
+# My notes on model. From all the available models:
+# Script Generation        gpt-5.5-pro      Voice contrast, natural banter, emotional pacing, YAML schema compliance.
+# Critique & Audit         o3-pro           Persona consistency, time budget enforcement, rubric scoring, bug catching.
+# Single-Model Fallback    gpt-5.5-pro      Best all-rounder if you want to avoid maintaining two separate model callers.
+
+# For non-expensive uses: gpt-5.5; strongest non-pro available model (or o4-mini for critique and audit)

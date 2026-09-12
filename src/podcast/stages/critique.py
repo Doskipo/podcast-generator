@@ -1,0 +1,250 @@
+"""Critique stage: review the written script for lines that are robotic,
+expository, break persona, invent listener detail, misattribute a source, or
+run too long — and rewrite (or split) only those.
+
+Typed input: Episode (+ Profile snapshot), ScriptOutput, the ranked articles
+(to re-check grounding on the revised script), and OutlineOutput (for each
+segment's word_budget and recurring-bit assignment). Typed output:
+CritiqueOutput, persisted as data/episodes/<episode_id>/critique.json —
+keeps both `original_script` and `revised_script`.
+
+Third of three script-related LLM steps — see docs/decisions.md ("Script
+rebuild") for why review is a separate pass from writing (podcast.stages.
+script) rather than one combined call, and ("Script quality pass") for the
+word-budget/listener-fact/line-length checks added here.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timezone
+
+from openai import OpenAI
+
+from podcast.env import require_env
+from podcast.models import (
+    Article,
+    Critique,
+    CritiqueOutput,
+    Episode,
+    Line,
+    Outline,
+    OutlineOutput,
+    Profile,
+    Script,
+    ScriptOutput,
+    SegmentBudgetFlag,
+)
+from podcast.paths import episode_dir
+from podcast.stages.script import flatten_lines, validate_source_ids
+
+logger = logging.getLogger(__name__)
+
+# No line should run over this many words, except inside the segment
+# carrying the recurring bit — matches the same rule stated to the writing
+# step (script.py); this is the code-side detector that feeds the critique
+# prompt specific line indices to split, since "does this read naturally
+# split in two" needs the model, but "is this line too long" doesn't.
+MAX_LINE_WORDS = 35
+
+# A segment counts as over budget once it exceeds its outline word_budget by
+# more than this fraction.
+BUDGET_OVERRUN_THRESHOLD = 0.20
+
+
+def _render_script(script: Script) -> str:
+    return "\n".join(f"[{i}] {line.speaker}: {line.text}" for i, line in enumerate(flatten_lines(script)))
+
+
+def _segment_has_bit_flags(outline: Outline, segment_count: int) -> list[bool]:
+    """Per-segment "does this segment carry the recurring bit" flags, aligned
+    to `script.segments` by position (the script step writes one segment per
+    outline story, in order). Falls back to False for any segment beyond
+    what the outline described, rather than crashing on a mismatch."""
+    flags = [story.recurring_bit is not None for story in outline.stories]
+    if len(flags) < segment_count:
+        flags += [False] * (segment_count - len(flags))
+    return flags
+
+
+def _over_length_line_indices(script: Script, bit_segment_flags: list[bool]) -> list[int]:
+    """Flat indices (flatten_lines order) of lines over MAX_LINE_WORDS words,
+    excluding lines inside a segment that carries the recurring bit."""
+    indices: list[int] = []
+    position = 0
+    for line in script.cold_open:
+        if len(line.text.split()) > MAX_LINE_WORDS:
+            indices.append(position)
+        position += 1
+    for seg_index, segment in enumerate(script.segments):
+        in_bit_segment = seg_index < len(bit_segment_flags) and bit_segment_flags[seg_index]
+        for line in segment.lines:
+            if not in_bit_segment and len(line.text.split()) > MAX_LINE_WORDS:
+                indices.append(position)
+            position += 1
+    for line in script.outro:
+        if len(line.text.split()) > MAX_LINE_WORDS:
+            indices.append(position)
+        position += 1
+    return indices
+
+
+def _build_prompts(profile: Profile, script: Script, outline: Outline) -> tuple[str, str]:
+    persona_block = "\n\n".join(f"{host.name}:\n{host.persona}" for host in profile.podcast.hosts)
+    listener = profile.podcast.listener
+
+    bit_segment_flags = _segment_has_bit_flags(outline, len(script.segments))
+    over_length = _over_length_line_indices(script, bit_segment_flags)
+    over_length_line = (
+        f"These line indices are over {MAX_LINE_WORDS} words and must be flagged with issue "
+        f"\"too_long\", split into a short back-and-forth exchange (2+ shorter lines, "
+        f"alternating the two hosts, via rewritten_lines) instead of one long line: "
+        f"{', '.join(str(i) for i in over_length)}.\n"
+        if over_length
+        else "No line is currently over the length limit.\n"
+    )
+
+    system_prompt = (
+        "You are a script editor for a two-host podcast, reviewing a draft for how it "
+        "will sound spoken out loud.\n\n"
+        f"Host personas:\n{persona_block}\n\n"
+        f"Listener: {listener.name} — this is everything actually known about them.\n\n"
+        "Flag any line that is:\n"
+        "- robotic: sounds like a report being read, not a person talking\n"
+        "- expository: over-explains something a real person would just say plainly\n"
+        "- breaks_persona: inconsistent with the host's persona above\n"
+        "- invented_listener_detail: states something about the listener (a hobby, "
+        "opinion, preference, biography) that isn't in the Listener line above\n"
+        "- the_article_phrasing: says 'the article' or 'the paper' instead of naming the "
+        "actual actor (researcher/company/organization) or calling it 'the report'\n"
+        "- too_long: see below\n\n"
+        f"{over_length_line}\n"
+        "For each flagged line, give its index (as shown in the numbered script below), "
+        "an issue label, and rewritten_lines — normally a single rewritten line that fixes "
+        "it while keeping the same meaning, speaker, and any facts it cites, but for a "
+        "too_long split, two or more shorter lines that together cover the same content as "
+        "a natural exchange (the first one should usually keep the original speaker). Only "
+        "flag lines that genuinely need a fix — most lines should be left alone."
+    )
+    user_prompt = "Numbered script (index: speaker: text):\n\n" + _render_script(script)
+    return system_prompt, user_prompt
+
+
+def _generate_critique(client: OpenAI, model: str, system_prompt: str, user_prompt: str) -> Critique:
+    """Boundary around the OpenAI call — the seam tests monkeypatch."""
+    completion = client.chat.completions.parse(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        response_format=Critique,
+    )
+    return completion.choices[0].message.parsed
+
+
+def _apply_critique(script: Script, critique: Critique) -> Script:
+    """Deep-copies `script` and, walking cold_open / each segment's lines /
+    outro in flatten_lines order, replaces each flagged position's original
+    line with its rewritten_lines (usually 1 line, 2+ for a too_long split) —
+    nothing else (segments, source_ids, unflagged lines) changes, so
+    grounding stays intact by construction."""
+    revised = script.model_copy(deep=True)
+    total_lines = len(flatten_lines(script))
+
+    replacements: dict[int, list[Line]] = {}
+    for flag in critique.flags:
+        if not (0 <= flag.line_index < total_lines):
+            logger.warning("critique flagged out-of-range line_index %d, ignoring", flag.line_index)
+            continue
+        if not flag.rewritten_lines:
+            logger.warning("critique flag at line_index %d had no rewritten_lines, ignoring", flag.line_index)
+            continue
+        replacements[flag.line_index] = flag.rewritten_lines
+
+    position = 0
+
+    def _rebuild(lines: list[Line]) -> list[Line]:
+        nonlocal position
+        rebuilt: list[Line] = []
+        for original_line in lines:
+            rebuilt.extend(replacements.get(position, [original_line]))
+            position += 1
+        return rebuilt
+
+    revised.cold_open = _rebuild(revised.cold_open)
+    for segment in revised.segments:
+        segment.lines = _rebuild(segment.lines)
+    revised.outro = _rebuild(revised.outro)
+
+    return revised
+
+
+def _segment_word_count(lines: list[Line]) -> int:
+    return sum(len(line.text.split()) for line in lines)
+
+
+def _budget_flags(outline: Outline, script: Script) -> list[SegmentBudgetFlag]:
+    """Segments (by position, matching outline.stories to script.segments)
+    whose word count exceeds their outline word_budget by more than
+    BUDGET_OVERRUN_THRESHOLD. Informational — reported, not auto-shortened."""
+    flags: list[SegmentBudgetFlag] = []
+    for index, (story, segment) in enumerate(zip(outline.stories, script.segments)):
+        budget = story.word_budget
+        actual = _segment_word_count(segment.lines)
+        if budget <= 0:
+            continue
+        over_by = (actual - budget) / budget
+        if over_by > BUDGET_OVERRUN_THRESHOLD:
+            flags.append(
+                SegmentBudgetFlag(
+                    segment_index=index,
+                    headline=segment.headline,
+                    word_budget=budget,
+                    actual_words=actual,
+                    over_by_percent=round(over_by * 100, 1),
+                )
+            )
+    return flags
+
+
+def critique_stage(
+    episode: Episode,
+    script_output: ScriptOutput,
+    articles: list[Article],
+    outline_output: OutlineOutput,
+    client: OpenAI | None = None,
+) -> CritiqueOutput:
+    if client is None:
+        client = OpenAI(api_key=require_env("OPENAI_API_KEY"))
+
+    profile = episode.profile
+    model = profile.llm.script_model  # same stronger model as writing — see docs/decisions.md
+    original_script = script_output.script
+    outline = outline_output.outline
+
+    system_prompt, user_prompt = _build_prompts(profile, original_script, outline)
+    critique = _generate_critique(client, model, system_prompt, user_prompt)
+
+    revised_script = _apply_critique(original_script, critique)
+
+    known_ids = {a.source_id for a in articles}
+    validate_source_ids(revised_script, known_ids)
+
+    total_words = sum(len(line.text.split()) for line in flatten_lines(revised_script))
+    over_budget_segments = _budget_flags(outline, revised_script)
+
+    output = CritiqueOutput(
+        episode_id=episode.episode_id,
+        generated_at=datetime.now(timezone.utc),
+        model=model,
+        critique=critique,
+        original_script=original_script,
+        revised_script=revised_script,
+        total_words=total_words,
+        over_budget_segments=over_budget_segments,
+    )
+
+    out_path = episode_dir(episode.episode_id) / "critique.json"
+    out_path.write_text(output.model_dump_json(indent=2), encoding="utf-8")
+    return output

@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from pathlib import Path
 
 import yaml
 from pydantic import BaseModel, Field, HttpUrl
+
+
+def _slugify(text: str) -> str:
+    """Lowercase, hyphenated slug — used as RecurringBit's default id when
+    none is set explicitly."""
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return slug or "bit"
 
 
 # Per-interest freshness window defaults: curated feeds (arXiv, a chosen blog's
@@ -46,9 +54,51 @@ class Interest(BaseModel):
         return DEFAULT_CURATED_WINDOW_HOURS if self.is_curated else DEFAULT_SEARCH_WINDOW_HOURS
 
 
+class Host(BaseModel):
+    """One podcast host. `persona` is injected verbatim into the script/
+    critique prompts — write it the way you'd brief a voice actor."""
+
+    name: str
+    voice_id: str  # ElevenLabs voice id — tts_stage reads this directly, no separate voice map
+    persona: str
+    home_turf: list[str] = Field(default_factory=list)  # topics/angles this host naturally gravitates to
+
+
+class Listener(BaseModel):
+    name: str
+
+
+class RecurringBit(BaseModel):
+    """A recurring segment/bit the outline can slot into an episode, at most
+    `max_per_episode` times. The outline references `effective_id`, never
+    `name` — a free-text name is prone to the model paraphrasing it back
+    slightly differently (seen in practice); an id is stable and, in the
+    outline prompt, constrained to a fixed enum so the model can't invent
+    one. See docs/decisions.md ("Recurring bit id fix")."""
+
+    name: str
+    id: str | None = None  # slug; derived from name if not given
+    description: str
+    max_per_episode: int
+
+    @property
+    def effective_id(self) -> str:
+        return self.id or _slugify(self.name)
+
+
+class Style(BaseModel):
+    humour: int = Field(ge=0, le=3)
+    depth: int = Field(ge=1, le=3)
+    tangents: bool
+    banter: bool
+
+
 class PodcastSettings(BaseModel):
     duration_minutes: int
-    hosts: list[str]
+    listener: Listener
+    hosts: list[Host]
+    recurring_bits: list[RecurringBit] = Field(default_factory=list)
+    style: Style
     tone: str
 
 
@@ -59,23 +109,20 @@ class FetchSettings(BaseModel):
 
 
 class LLMSettings(BaseModel):
-    """Knobs for LLM-backed stages (script, ...). Overridable per profile."""
+    """Knobs for LLM-backed stages. Overridable per profile."""
 
-    model: str = "gpt-4o-mini"  # cheap default
-
-
-# Placeholder ElevenLabs premade voice ids, used as defaults so the two demo
-# hosts (Nova, Max) work out of the box. Override per profile with real voices.
-_DEFAULT_VOICES = {
-    "Nova": "21m00Tcm4TlvDq8ikWAM",  # "Rachel"
-    "Max": "pNInz6obpgDQGcFmaJgB",  # "Adam"
-}
+    model: str = "gpt-4o-mini"  # cheap default — scoring, query generation, outline, critique
+    # Stronger model for the script-writing step, where persona/voice quality
+    # matters most and the per-episode call count is low (one call). See
+    # docs/decisions.md ("Script rebuild") for the cost trade-off.
+    script_model: str = "gpt-4o"
 
 
 class TTSSettings(BaseModel):
-    """Knobs for the tts stage. Overridable per profile."""
+    """Knobs for the tts stage. Overridable per profile. Voice ids live on
+    each Host now (profile.podcast.hosts[].voice_id), not here — see
+    docs/decisions.md ("PodcastSettings migration")."""
 
-    voices: dict[str, str] = Field(default_factory=lambda: dict(_DEFAULT_VOICES))
     model_id: str = "eleven_turbo_v2_5"  # cheap/fast default
 
 
@@ -144,6 +191,11 @@ class FetchOutput(BaseModel):
 
     episode_id: str
     fetched_at: datetime
+    # Feed URLs actually queried this run (one per interest's curated feed or
+    # generated/cached query, plus top-level profile.feeds extras) — NOT
+    # len(profile.feeds), which only counts the top-level extras and is 0 for
+    # a profile whose feeds all come from interests. See docs/decisions.md.
+    feeds_count: int = 0
     articles: list[Article]
 
 
@@ -198,9 +250,51 @@ class RankOutput(BaseModel):
     selected: list[Article]  # the chosen subset, text extracted, in global order
 
 
+class Angle(BaseModel):
+    """The narrative take on one outline story — what the script step should
+    build the segment's dialogue around."""
+
+    why_it_matters: str
+    tension_or_surprise: str
+    host_take: str  # which host should lead this story, and why
+    # A possible tangent or analogy from a host's backstory or the listener's
+    # interests. None when nothing genuinely fits, or when this story carries
+    # the recurring bit instead — a segment never gets both (see
+    # outline.py:_validate_outline and docs/decisions.md).
+    tangent: str | None = None
+
+
+class OutlineStory(BaseModel):
+    headline: str
+    source_ids: list[str]  # subset of the ranked articles' source_ids this story is grounded in
+    angle: Angle
+    # RecurringBit.effective_id of a profile.podcast.recurring_bits entry, if
+    # one fits here — never the free-text name (see RecurringBit).
+    recurring_bit: str | None = None
+    # Target word count for this story's segment, proportional to the
+    # story's rank score. Computed in code by outline_stage after the LLM
+    # call (not asked of the model) — defaults to 0 until then.
+    word_budget: int = 0
+
+
+class Outline(BaseModel):
+    title: str
+    stories: list[OutlineStory]  # already in the intended narrative order
+
+
+class OutlineOutput(BaseModel):
+    """Typed output of the outline stage, persisted as outline.json."""
+
+    episode_id: str
+    generated_at: datetime
+    model: str
+    outline: Outline
+
+
 class Line(BaseModel):
     speaker: str
     text: str
+    pause_ms: int | None = None  # optional pause after this line, for a natural beat/reaction
 
 
 class Segment(BaseModel):
@@ -223,6 +317,54 @@ class ScriptOutput(BaseModel):
     generated_at: datetime
     model: str
     script: Script
+
+
+class CritiqueFlag(BaseModel):
+    """One line the critique pass flagged, and its fix. `line_index` is the
+    flagged line's position in the ORIGINAL script's flattened line order —
+    cold_open, then every segment's lines, then outro (see
+    script.py:flatten_lines) — the same order tts_stage synthesizes in.
+    `rewritten_lines` replaces that one original line with one or more lines:
+    usually a single rewritten line, but more than one when the fix is to
+    split an over-long or over-expository line into a short back-and-forth
+    exchange between the hosts."""
+
+    line_index: int
+    issue: str  # e.g. "robotic", "expository", "breaks_persona", "invented_listener_detail", "too_long"
+    rewritten_lines: list[Line]
+
+
+class Critique(BaseModel):
+    flags: list[CritiqueFlag]
+
+
+class SegmentBudgetFlag(BaseModel):
+    """A segment whose word count landed more than 20% over its outline
+    word_budget — computed in code (word counting needs no LLM judgment),
+    not part of the LLM-facing Critique schema. Informational: reported, not
+    auto-shortened."""
+
+    segment_index: int
+    headline: str
+    word_budget: int
+    actual_words: int
+    over_by_percent: float
+
+
+class CritiqueOutput(BaseModel):
+    """Typed output of the critique stage, persisted as critique.json. Keeps
+    both the pre-critique and rewritten script — critique.py only replaces
+    flagged lines (via CritiqueFlag), never touches segments/source_ids, so
+    `revised_script` stays grounded exactly like `original_script`."""
+
+    episode_id: str
+    generated_at: datetime
+    model: str
+    critique: Critique
+    original_script: Script
+    revised_script: Script
+    total_words: int  # word count of revised_script (cold_open + segments + outro)
+    over_budget_segments: list[SegmentBudgetFlag]
 
 
 class TTSLine(BaseModel):

@@ -1,5 +1,6 @@
-"""Smoke tests for the script stage. No network: the OpenAI call is monkeypatched
-at the script module's _generate_script seam.
+"""Smoke tests for the script stage (the writing step: outline + articles ->
+dialogue). No network: the OpenAI call is monkeypatched at the script
+module's _generate_script seam.
 """
 
 from __future__ import annotations
@@ -10,17 +11,27 @@ from pathlib import Path
 import pytest
 
 from podcast.models import (
+    Angle,
     Article,
     Episode,
-    FetchOutput,
+    Host,
     Interest,
     Line,
+    Listener,
+    Outline,
+    OutlineOutput,
+    OutlineStory,
     PodcastSettings,
     Profile,
     Script,
     Segment,
+    Style,
 )
 from podcast.stages import script as script_module
+
+
+def _host(name: str) -> Host:
+    return Host(name=name, voice_id=f"voice-{name.lower()}", persona=f"{name} is curious and precise.", home_turf=[])
 
 
 def _profile() -> Profile:
@@ -28,7 +39,13 @@ def _profile() -> Profile:
         name="Test",
         interests=[Interest(topic="testing", weight=1.0)],
         feeds=["https://example.com/feed.xml"],
-        podcast=PodcastSettings(duration_minutes=8, hosts=["Nova", "Max"], tone="curious"),
+        podcast=PodcastSettings(
+            duration_minutes=8,
+            listener=Listener(name="Eudald"),
+            hosts=[_host("Nova"), _host("Max")],
+            style=Style(humour=2, depth=2, tangents=True, banter=True),
+            tone="curious",
+        ),
     )
 
 
@@ -50,12 +67,23 @@ def _episode(profile: Profile, episode_id: str = "ep1") -> Episode:
     return Episode(episode_id=episode_id, created_at=datetime.now(timezone.utc), profile=profile)
 
 
-def _fetch_output(episode_id: str, articles: list[Article]) -> FetchOutput:
-    return FetchOutput(
-        episode_id=episode_id,
-        fetched_at=datetime.now(timezone.utc),
-        articles=articles,
+def _outline_output(episode_id: str, source_id: str) -> OutlineOutput:
+    outline = Outline(
+        title="Test Episode",
+        stories=[
+            OutlineStory(
+                headline="Something happened",
+                source_ids=[source_id],
+                angle=Angle(
+                    why_it_matters="it matters",
+                    tension_or_surprise="a twist",
+                    host_take="Nova cares because...",
+                    tangent="reminds Nova of a story",
+                ),
+            )
+        ],
     )
+    return OutlineOutput(episode_id=episode_id, generated_at=datetime.now(timezone.utc), model="gpt-4o-mini", outline=outline)
 
 
 def _fixture_script(source_id: str) -> Script:
@@ -89,7 +117,7 @@ def test_script_stage_persists_and_matches_model(tmp_path, monkeypatch):
     profile = _profile()
     episode = _episode(profile)
     articles = [_article("abcd1234")]
-    fetch_output = _fetch_output(episode.episode_id, articles)
+    outline_output = _outline_output(episode.episode_id, "abcd1234")
 
     fixture_script = _fixture_script("abcd1234")
     monkeypatch.setattr(
@@ -99,9 +127,11 @@ def test_script_stage_persists_and_matches_model(tmp_path, monkeypatch):
     )
     _patch_episode_dir(monkeypatch, tmp_path)
 
-    output = script_module.script_stage(episode, fetch_output, client=object())
+    output = script_module.script_stage(episode, outline_output, articles, client=object())
 
-    assert output.model == profile.llm.model
+    # uses the stronger model, not the default cheap one
+    assert output.model == profile.llm.script_model
+    assert output.model != profile.llm.model
 
     script_path = tmp_path / "episodes" / episode.episode_id / "script.json"
     assert script_path.exists()
@@ -113,7 +143,7 @@ def test_script_stage_rejects_unknown_source_ids(tmp_path, monkeypatch):
     profile = _profile()
     episode = _episode(profile)
     articles = [_article("abcd1234")]
-    fetch_output = _fetch_output(episode.episode_id, articles)
+    outline_output = _outline_output(episode.episode_id, "abcd1234")
 
     fixture_script = _fixture_script("unknown99")
     monkeypatch.setattr(
@@ -124,7 +154,7 @@ def test_script_stage_rejects_unknown_source_ids(tmp_path, monkeypatch):
     _patch_episode_dir(monkeypatch, tmp_path)
 
     with pytest.raises(ValueError):
-        script_module.script_stage(episode, fetch_output, client=object())
+        script_module.script_stage(episode, outline_output, articles, client=object())
 
 
 def test_script_stage_requires_openai_api_key(tmp_path, monkeypatch):
@@ -133,7 +163,19 @@ def test_script_stage_requires_openai_api_key(tmp_path, monkeypatch):
 
     profile = _profile()
     episode = _episode(profile)
-    fetch_output = _fetch_output(episode.episode_id, [_article("abcd1234")])
+    articles = [_article("abcd1234")]
+    outline_output = _outline_output(episode.episode_id, "abcd1234")
 
     with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
-        script_module.script_stage(episode, fetch_output)
+        script_module.script_stage(episode, outline_output, articles)
+
+
+def test_flatten_lines_order():
+    script = _fixture_script("abcd1234")
+    flat = script_module.flatten_lines(script)
+    assert [line.text for line in flat] == [
+        "Welcome back!",
+        "Here's the story.",
+        "Tell me more.",
+        "See you next time.",
+    ]

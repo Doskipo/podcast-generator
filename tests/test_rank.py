@@ -7,9 +7,11 @@ tests run real feedparser against fixture feed content.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
+import httpx
 import pytest
 
 from podcast.models import (
@@ -17,11 +19,14 @@ from podcast.models import (
     ArticleScore,
     Episode,
     FetchOutput,
+    Host,
     Interest,
+    Listener,
     PodcastSettings,
     Profile,
     RankOutput,
     ScoreBatch,
+    Style,
 )
 from podcast.stages import rank as rank_module
 
@@ -33,7 +38,16 @@ def _profile(interests: list[Interest], duration_minutes: int = 8) -> Profile:
     return Profile(
         name="Test",
         interests=interests,
-        podcast=PodcastSettings(duration_minutes=duration_minutes, hosts=["Nova", "Max"], tone="curious"),
+        podcast=PodcastSettings(
+            duration_minutes=duration_minutes,
+            listener=Listener(name="Eudald"),
+            hosts=[
+                Host(name="Nova", voice_id="voice-nova", persona="Nova is curious and precise."),
+                Host(name="Max", voice_id="voice-max", persona="Max is curious and precise."),
+            ],
+            style=Style(humour=2, depth=2, tangents=True, banter=True),
+            tone="curious",
+        ),
     )
 
 
@@ -420,3 +434,49 @@ def test_rank_stage_requires_openai_api_key(tmp_path, monkeypatch):
 
     with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
         rank_module.rank_stage(episode, fetch_output)
+
+
+def test_resolve_and_download_logs_status_and_url_at_warning_without_traceback(monkeypatch, caplog):
+    class FakeResponse:
+        status_code = 403
+        url = "https://real-publisher.example.com/redirected-article"
+
+        def raise_for_status(self):
+            raise httpx.HTTPStatusError("403 Forbidden", request=None, response=self)
+
+    monkeypatch.setattr(rank_module.httpx, "get", lambda *args, **kwargs: FakeResponse())
+
+    with caplog.at_level(logging.DEBUG, logger="podcast.stages.rank"):
+        final_url, html = rank_module._resolve_and_download("http://www.bing.com/news/apiclick.aspx?url=...")
+
+    assert (final_url, html) == (None, None)
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert warnings[0].exc_info is None  # no traceback at WARNING — just the summary line
+    assert "status=403" in warnings[0].getMessage()
+    assert "real-publisher.example.com/redirected-article" in warnings[0].getMessage()
+
+    debugs = [r for r in caplog.records if r.levelname == "DEBUG"]
+    assert len(debugs) == 1
+    assert debugs[0].exc_info is not None  # traceback still available at DEBUG
+
+
+def test_resolve_and_download_degrades_gracefully_with_no_response(monkeypatch, caplog):
+    # errors below the HTTP layer (connection refused, timeout, ...) have no
+    # .response to read a status/final url from — should still log one line,
+    # not crash trying to read attributes that don't exist.
+    def fake_get(*args, **kwargs):
+        raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(rank_module.httpx, "get", fake_get)
+
+    with caplog.at_level(logging.WARNING, logger="podcast.stages.rank"):
+        final_url, html = rank_module._resolve_and_download("http://example.com/unreachable")
+
+    assert (final_url, html) == (None, None)
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert warnings[0].exc_info is None
+    assert "status=None" in warnings[0].getMessage()
+    assert "http://example.com/unreachable" in warnings[0].getMessage()
