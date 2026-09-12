@@ -672,3 +672,103 @@ willing to invent, too free with the recurring bit and tangents crowding every s
   critique needs both. `generate.py`'s critique summary line now reports total words and
   over-budget segment count alongside the existing flagged-line count.
 - Solves the demo problem (an interest with no news this week still gets airtime). Keep news as the core, because the assignment says news, but add a second segment type: when an interest has zero fresh candidates, fetch a grounded evergreen source (the Wikipedia API is reliable and extracts cleanly) tagged source: evergreen, and the outline can turn it into a "primer" or "did you know" segment. Grounding rule still holds: the facts come from the fetched text, so no hallucinated trivia. It's maybe an hour of work; do it after the script rebuild if today allows, otherwise tomorrow morning. Log it now as a decision: "news first; evergreen fallback so every interest can appear; never ungrounded".
+
+## Voice and dynamics pass — 2026-09-12
+- **`tts.model_id` before this change: `"eleven_turbo_v2_5"`** (the cheap/fast default set on Day 1,
+  reused unchanged through the PodcastSettings migration). No audio-tag support, no dialogue mode
+  — that's what this pass replaces.
+- **Text-to-dialogue: tested live, works with our key.** `client.text_to_dialogue.convert_with_timestamps(inputs=[...], model_id="eleven_v3")`
+  against a real 2-turn payload (Alice/Bob voice ids from `profiles/eudald.yaml`) returned 200 with
+  real audio — confirmed both that the endpoint is enabled for this key and that `model_id=
+  "eleven_v3"` is the one that works with it (the installed `elevenlabs` SDK, 2.67.0, exposes
+  `text_to_dialogue` at all, which itself isn't guaranteed across SDK/plan versions). A separate
+  live check via `client.models.list()` failed with 401 `missing_permissions` (the key lacks
+  `models_read`) — unrelated to text_to_dialogue access, just means model capability can't be
+  introspected, only tried. Later validated the real `tts_stage` code (not just the raw SDK) end
+  to end against a throwaway 2-line dialogue script: dialogue mode succeeded, both lines' audio
+  files were sliced out and written correctly, sizes were non-trivial and distinct per line.
+- **Architecture: dialogue mode primary, per-line v3 fallback, both used, one always ends up
+  file-per-line.** `text_to_dialogue.convert_with_timestamps` returns one combined audio blob for
+  a whole chunk, not separate files — but its `voice_segments` (per turn: `dialogue_input_index`,
+  `start_time_seconds`, `end_time_seconds`) give exactly enough to slice it back apart.
+  `tts.py:_slice_dialogue_audio` cuts each line's clip from the *end of the previous turn* (0 for
+  the first) to *this turn's own end* (or the full clip length, for the chunk's last turn, to
+  catch any trailing tail) — so whatever natural pause ElevenLabs left between turns stays
+  embedded as trailing silence on the earlier line's clip rather than being trimmed away, and the
+  clips concatenated back-to-back exactly reconstruct the original combined audio. This is what
+  lets dialogue mode keep the existing one-file-per-line `TTSLine`/`tts_manifest.json`/stitch
+  contract unchanged, instead of needing a parallel "whole-chunk audio" artefact shape. On any
+  failure (permission, transient error, a length error) the whole episode falls back to per-line
+  `text_to_speech.convert`, one call per line, same v3 model family for tag support. Chunks
+  already written from a partially-successful dialogue attempt are left on disk and simply
+  reused by the per-line pass's own skip-if-exists check — cheap to reason about, at the cost of
+  `synthesis_mode` sometimes reading "per_line" for an episode that's actually a mix; flagged as
+  a known simplification, not fixed here.
+- **Chunking:** `DIALOGUE_CHUNK_CHAR_LIMIT = 2500`, picked conservatively — ElevenLabs doesn't
+  document an exact character/turn cap for text_to_dialogue as of this writing, and finding the
+  real one empirically would mean deliberately triggering (and paying for) failures. Revisit if
+  a length-shaped failure actually shows up in `_synthesize_dialogue`'s fallback logs.
+- **Per-host `voice_settings` (stability/style/similarity) only take effect in the per-line
+  fallback.** `DialogueInput` (the text_to_dialogue request shape) has exactly two fields, `text`
+  and `voice_id` — no per-turn settings — confirmed by inspecting the installed SDK's type
+  directly, not assumed. So a host's `voice_settings` is real but conditional: it does nothing
+  while dialogue mode is succeeding, and only shapes the voice once/if the pipeline falls back.
+  Documented prominently (`HostVoiceSettings`'s docstring, this entry) rather than routing around
+  it — forcing fallback just to honor voice_settings would fight the whole point of preferring
+  dialogue mode (better cross-turn coherence, fewer requests) for a knob that mostly matters for
+  character consistency, which dialogue mode's own inter-turn coherence partly substitutes for
+  anyway. `profiles/eudald.yaml`: Alice (expressive) got `stability=0.3, style=0.6`, Bob (stable)
+  got `stability=0.75, style=0.15`, both `similarity=0.75` — illustrative defaults, not tuned
+  against real audio.
+- **`delivery: str | None` on `Line`**, mapped to a bracketed tag prefix ("[laughs] ...") by
+  `tts.py:_tagged_text` in both synthesis paths, gated on `script.py:supports_audio_tags(model_id)`
+  (a `"v3" in model_id.lower()` check — there's no capability-lookup API, so this is the same
+  heuristic tts.py itself would need). Caught one real issue running this against the actual
+  profile: the writer sometimes opens a line with its own literal `[laughs]` *and* sets
+  `delivery="laughs"` — `_tagged_text` now skips prefixing when the line's text already starts
+  with `[`, so it doesn't double up.
+- **`pause_ms` guidance, not just a field.** The script prompt states concrete ranges (~100-200ms
+  for a quick exchange, ~600-900ms for a beat, the long end reserved for right before the
+  recurring bit or a reveal) rather than leaving the value to the model's judgment alone — a bare
+  "set pause_ms appropriately" instruction is exactly the kind of vague ask this project has
+  found doesn't reliably produce a deliberate result. `stitch.py` reads `TTSLine.pause_ms` (now
+  copied onto `TTSLine` from the source `Line`, not just living on the script) as the gap after
+  that line — `DEFAULT_PAUSE_MS = 200` when unset — but **only outside dialogue mode**
+  (`TTSOutput.synthesis_mode`): dialogue-mode clips already have their natural pacing baked in
+  from the slicing above, so stitching them with an *additional* gap would double up pauses that
+  are already there. The old fixed `SILENCE_MS = 400` constant is gone.
+- **Laughter: tag when supported, spoken word when not, never standalone.** `script.py`'s
+  laughter instruction is conditional on `supports_audio_tags` — `[laughs]` inline when true, a
+  spoken reaction word inside a longer line when false — and either way, never a standalone line
+  like "Ha." on its own (the literal ask). Verified in a real run: `[laughs]`, `[deadpan]`,
+  `[amused]`, `[excited]` tags all showed up appropriately, none as bare lines.
+- **Script rules (interjections/em dash/emotional reactions/"Correct." cap).** All four are
+  prompt-level writing rules in `script.py`; the "Correct." cap is also code-checked, the same
+  pattern as the word-budget and line-length checks: `critique.py:_repeated_correct_line_indices`
+  finds every occurrence past the first (exact match on `"Correct."` as a stripped line, not a
+  substring) and feeds those indices to the critique prompt as a `repeated_correct` fix target,
+  reusing the same flag-and-rewrite mechanism as `too_long`. The other three (interjections
+  cutting in, em-dash trailing lines, emotional-not-evaluative reactions) are prompt-only —
+  there's no reliable code-level way to judge "is this reaction emotional or evaluative" the way
+  there is for counting words or matching an exact phrase.
+- **`podcast.name` + one-breath cold-open identification.** New required `PodcastSettings.name`
+  field — required because the whole point is a real spoken identification, not a fallback empty
+  string. **Breaking for old persisted `episode.json` snapshots** (the profile is embedded there
+  in full) the same way the `hosts: list[str] -> list[Host]` migration was — one existing test
+  episode (`20260912T152431Z`) needed its `episode.json` hand-patched with `podcast.name` to keep
+  resuming from it; no general migration path built, matching how that earlier breaking change
+  was handled. **Picked `"Two Angles"` as the actual name in `profiles/eudald.yaml`** — a
+  placeholder invented to unblock testing the cold-open rule for real, not a considered creative
+  choice; flagged for the user to rename. Verified in the same real run: cold open was `"This is
+  Two Angles, with Alice and Bob."` — one line, both names, the show's name, nothing else.
+- **Per-episode character cost — computed, not measured against a real synthesis bill.** Character
+  count is exactly `sum(len(_tagged_text(line)) for line in flatten_lines(script))` — deterministic
+  from the persisted script text, no need to actually call ElevenLabs to know it (unlike the
+  earlier per-LLM-call token/cost estimates, which were genuinely estimates). `TTSLine.characters`
+  now counts the tagged text actually sent to the API (including a delivery-tag prefix), not just
+  `line.text` — it wasn't before, a small accuracy bug caught while building this entry, fixed
+  before it shipped. Re-ran outline → script → critique on the existing `ranked.json` with today's
+  new writing rules (personas/pauses/tags/cold-open all in effect) to get a real number: **60
+  lines, 1087 words, 6,877 characters** for one real 8-minute episode — `generate.py`'s tts
+  summary line now prints `synthesis_mode` and `total_characters` (`TTSOutput.total_characters`)
+  every run, so this is visible per-episode going forward, not just this one measurement.

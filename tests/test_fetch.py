@@ -28,6 +28,7 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 def _podcast_settings() -> PodcastSettings:
     return PodcastSettings(
+        name="Test Podcast",
         duration_minutes=8,
         listener=Listener(name="Eudald"),
         hosts=[

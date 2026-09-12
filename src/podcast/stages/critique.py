@@ -89,6 +89,21 @@ def _over_length_line_indices(script: Script, bit_segment_flags: list[bool]) -> 
     return indices
 
 
+def _repeated_correct_line_indices(script: Script) -> list[int]:
+    """Flat indices (flatten_lines order) of every occurrence of the
+    standalone reaction "Correct." past the first — the rule is "at most
+    once per episode", so the first is left alone and only repeats get
+    flagged."""
+    indices: list[int] = []
+    seen_once = False
+    for i, line in enumerate(flatten_lines(script)):
+        if line.text.strip() == "Correct.":
+            if seen_once:
+                indices.append(i)
+            seen_once = True
+    return indices
+
+
 def _build_prompts(profile: Profile, script: Script, outline: Outline) -> tuple[str, str]:
     persona_block = "\n\n".join(f"{host.name}:\n{host.persona}" for host in profile.podcast.hosts)
     listener = profile.podcast.listener
@@ -104,6 +119,16 @@ def _build_prompts(profile: Profile, script: Script, outline: Outline) -> tuple[
         else "No line is currently over the length limit.\n"
     )
 
+    repeated_correct = _repeated_correct_line_indices(script)
+    repeated_correct_line = (
+        f"These line indices repeat the standalone reaction \"Correct.\" (only the first "
+        f"use in the episode is allowed) and must be flagged with issue \"repeated_correct\" "
+        f"and rewritten with a different, emotionally-varied way of agreeing: "
+        f"{', '.join(str(i) for i in repeated_correct)}.\n"
+        if repeated_correct
+        else ""
+    )
+
     system_prompt = (
         "You are a script editor for a two-host podcast, reviewing a draft for how it "
         "will sound spoken out loud.\n\n"
@@ -117,8 +142,10 @@ def _build_prompts(profile: Profile, script: Script, outline: Outline) -> tuple[
         "opinion, preference, biography) that isn't in the Listener line above\n"
         "- the_article_phrasing: says 'the article' or 'the paper' instead of naming the "
         "actual actor (researcher/company/organization) or calling it 'the report'\n"
-        "- too_long: see below\n\n"
-        f"{over_length_line}\n"
+        "- too_long: see below\n"
+        "- repeated_correct: see below\n\n"
+        f"{over_length_line}"
+        f"{repeated_correct_line}\n"
         "For each flagged line, give its index (as shown in the numbered script below), "
         "an issue label, and rewritten_lines — normally a single rewritten line that fixes "
         "it while keeping the same meaning, speaker, and any facts it cites, but for a "

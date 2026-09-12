@@ -37,6 +37,7 @@ def _profile(recurring_bits: list[RecurringBit] | None = None) -> Profile:
         name="Test",
         interests=[Interest(topic="testing", weight=1.0)],
         podcast=PodcastSettings(
+            name="Test Podcast",
             duration_minutes=8,
             listener=Listener(name="Eudald"),
             hosts=[_host("Nova"), _host("Max")],

@@ -37,6 +37,7 @@ def _write_profile(path: Path) -> None:
         name="Test",
         interests=[Interest(topic="testing", weight=1.0, feeds=["https://example.com/feed.xml"])],
         podcast=PodcastSettings(
+            name="Test Podcast",
             duration_minutes=8,
             listener=Listener(name="Eudald"),
             hosts=[
@@ -119,7 +120,13 @@ def _patch_stages(monkeypatch, calls: list[str]) -> None:
 
     def fake_tts_stage(episode, script_output, client=None):
         calls.append("tts")
-        return TTSOutput(episode_id=episode.episode_id, generated_at=datetime.now(timezone.utc), lines=[])
+        return TTSOutput(
+            episode_id=episode.episode_id,
+            generated_at=datetime.now(timezone.utc),
+            lines=[],
+            synthesis_mode="dialogue",
+            total_characters=0,
+        )
 
     def fake_stitch_stage(episode, tts_output):
         calls.append("stitch")

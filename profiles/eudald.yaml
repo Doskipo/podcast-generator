@@ -30,12 +30,24 @@ interests:
   - Olivia Dean new single release
   - Olivia Dean collaboration with?
 podcast:
+  # Placeholder — picked to fit the "one-breath cold-open identification"
+  # rule (2026-09-12), not a real chosen name. Change it to whatever you
+  # actually want the show called.
+  name: Two Angles
   duration_minutes: 8
   listener:
     name: Eudald
   hosts:
     - name: Alice
       voice_id: EST9Ui6982FZPSi7gCHi
+      # Expressive: lower stability (more delivery variation take-to-take),
+      # higher style (leans into the voice's inherent character). Only
+      # applies when tts falls back to per-line synthesis — the
+      # text_to_dialogue endpoint has no per-turn settings (2026-09-12).
+      voice_settings:
+        stability: 0.3
+        style: 0.6
+        similarity: 0.75
       persona: |
         Background: Grew up in a loud, chaotic, multi-generational household where you had to be a captivating storyteller just to get a word in at the dinner table. She actively surfaces this backstory in her analogies (e.g., comparing a messy League of Legends team fight to trying to get a word in during Sunday dinner).
         Home Turf: Music (composition, vocal techniques, chord progressions) and the emotional storylines of esports (player mentalities, rivalries, and narrative comebacks).
@@ -48,6 +60,13 @@ podcast:
       home_turf: [music, esports storylines]
     - name: Bob
       voice_id: TWutjvRaJqAX89preB4e
+      # Stable: higher stability (consistent, deadpan take-to-take), lower
+      # style (doesn't lean into vocal flourish). Same fallback-only caveat
+      # as Alice's.
+      voice_settings:
+        stability: 0.75
+        style: 0.15
+        similarity: 0.75
       persona: |
         Background: Raised by highly practical, frugal parents who believed in fixing things rather than buying new ones. He regularly reasons from this past (e.g., "my dad would have fixed that structural flaw with duct tape and a spreadsheet").
         Home Turf: Training mechanics (calisthenics programming, mobility limitations), advanced mathematics (causal emergence, state-space models), and game systems (min-maxing, statistical advantages).

@@ -41,6 +41,7 @@ def _profile() -> Profile:
         name="Test",
         interests=[Interest(topic="testing", weight=1.0)],
         podcast=PodcastSettings(
+            name="Test Podcast",
             duration_minutes=8,
             listener=Listener(name="Eudald"),
             hosts=[_host("Nova"), _host("Max")],
@@ -315,3 +316,46 @@ def test_critique_stage_requires_openai_api_key(tmp_path, monkeypatch):
 
     with pytest.raises(RuntimeError, match="OPENAI_API_KEY"):
         critique_module.critique_stage(episode, script_output, articles, outline_output)
+
+
+def test_repeated_correct_line_indices_flags_only_repeats():
+    script = Script(
+        title="t",
+        cold_open=[Line(speaker="Nova", text="Correct.")],  # first use: allowed
+        segments=[
+            Segment(
+                headline="h",
+                source_ids=[],
+                lines=[
+                    Line(speaker="Max", text="Correct."),  # 2nd use: flagged
+                    Line(speaker="Nova", text="Sure, that tracks."),
+                ],
+            )
+        ],
+        outro=[Line(speaker="Max", text="Correct.")],  # 3rd use: flagged
+    )
+    indices = critique_module._repeated_correct_line_indices(script)
+    assert indices == [1, 3]  # cold_open(0)=allowed, segment line(1)=flagged, line(2)=unrelated, outro(3)=flagged
+
+
+def test_critique_stage_flags_repeated_correct(tmp_path, monkeypatch):
+    profile = _profile()
+    episode = _episode(profile)
+    articles = [_article("abcd1234")]
+    script_output = _script_output(episode.episode_id, "abcd1234")
+    script_output.script.cold_open = [Line(speaker="Nova", text="Correct.")]
+    script_output.script.segments[0].lines[1] = Line(speaker="Max", text="Correct.")
+    outline_output = _outline_output(episode.episode_id, "abcd1234")
+
+    captured_prompt = {}
+
+    def fake_generate_critique(client, model, system_prompt, user_prompt):
+        captured_prompt["system"] = system_prompt
+        return Critique(flags=[])
+
+    monkeypatch.setattr(critique_module, "_generate_critique", fake_generate_critique)
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    critique_module.critique_stage(episode, script_output, articles, outline_output, client=object())
+
+    assert "repeated_correct" in captured_prompt["system"]

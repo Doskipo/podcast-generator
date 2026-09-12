@@ -54,6 +54,19 @@ class Interest(BaseModel):
         return DEFAULT_CURATED_WINDOW_HOURS if self.is_curated else DEFAULT_SEARCH_WINDOW_HOURS
 
 
+class HostVoiceSettings(BaseModel):
+    """ElevenLabs per-voice knobs (0.0-1.0). Only applied in tts_stage's
+    per-line fallback path — the text_to_dialogue endpoint's DialogueInput
+    has no per-turn settings field, so a host's voice_settings has no effect
+    when dialogue mode succeeds. See docs/decisions.md ("Voice and dynamics
+    pass"). Any field left unset falls back to ElevenLabs' own default for
+    that voice."""
+
+    stability: float | None = Field(default=None, ge=0.0, le=1.0)
+    similarity: float | None = Field(default=None, ge=0.0, le=1.0)
+    style: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
 class Host(BaseModel):
     """One podcast host. `persona` is injected verbatim into the script/
     critique prompts — write it the way you'd brief a voice actor."""
@@ -62,6 +75,7 @@ class Host(BaseModel):
     voice_id: str  # ElevenLabs voice id — tts_stage reads this directly, no separate voice map
     persona: str
     home_turf: list[str] = Field(default_factory=list)  # topics/angles this host naturally gravitates to
+    voice_settings: HostVoiceSettings | None = None
 
 
 class Listener(BaseModel):
@@ -94,6 +108,7 @@ class Style(BaseModel):
 
 
 class PodcastSettings(BaseModel):
+    name: str  # the show's name — spoken in the cold open's host identification
     duration_minutes: int
     listener: Listener
     hosts: list[Host]
@@ -121,9 +136,14 @@ class LLMSettings(BaseModel):
 class TTSSettings(BaseModel):
     """Knobs for the tts stage. Overridable per profile. Voice ids live on
     each Host now (profile.podcast.hosts[].voice_id), not here — see
-    docs/decisions.md ("PodcastSettings migration")."""
+    docs/decisions.md ("PodcastSettings migration").
 
-    model_id: str = "eleven_turbo_v2_5"  # cheap/fast default
+    Both model ids default to a v3-class model, needed for audio-tag support
+    (Line.delivery) in either synthesis path — see docs/decisions.md ("Voice
+    and dynamics pass")."""
+
+    model_id: str = "eleven_v3"  # per-line fallback synthesis model
+    dialogue_model_id: str = "eleven_v3"  # text_to_dialogue (primary) model
 
 
 class Profile(BaseModel):
@@ -294,7 +314,21 @@ class OutlineOutput(BaseModel):
 class Line(BaseModel):
     speaker: str
     text: str
-    pause_ms: int | None = None  # optional pause after this line, for a natural beat/reaction
+    # Optional pause AFTER this line, in ms. The script writer sets this
+    # deliberately: ~100-200 for a quick back-and-forth exchange, ~600-900
+    # for a beat — reserve the long end for right before the recurring bit
+    # or a reveal, not routinely. tts_stage's per-line fallback ignores this
+    # (ElevenLabs has no "pause after" concept); stitch_stage applies it as
+    # the gap between this line's clip and the next, defaulting to 200ms
+    # when unset, but only outside dialogue mode — see docs/decisions.md
+    # ("Voice and dynamics pass").
+    pause_ms: int | None = None
+    # A short audio-tag descriptor ("laughs", "sighs", "deadpan", "amused",
+    # "whispers", ...), mapped by tts_stage to a bracketed tag prefix
+    # ("[laughs] ...") when the configured model supports them (a v3-class
+    # model — see podcast.stages.script:supports_audio_tags). None for an
+    # ordinary line.
+    delivery: str | None = None
 
 
 class Segment(BaseModel):
@@ -330,7 +364,9 @@ class CritiqueFlag(BaseModel):
     exchange between the hosts."""
 
     line_index: int
-    issue: str  # e.g. "robotic", "expository", "breaks_persona", "invented_listener_detail", "too_long"
+    # e.g. "robotic", "expository", "breaks_persona", "invented_listener_detail",
+    # "too_long", "the_article_phrasing", "repeated_correct"
+    issue: str
     rewritten_lines: list[Line]
 
 
@@ -374,6 +410,9 @@ class TTSLine(BaseModel):
     speaker: str
     file: str  # path relative to the episode dir, e.g. "segments/000_Nova.mp3"
     characters: int  # length of the synthesized text, for cost tracking
+    # Copied from the source Line — stitch_stage reads this (outside dialogue
+    # mode only; see TTSOutput.synthesis_mode) to size the gap after this line.
+    pause_ms: int | None = None
 
 
 class TTSOutput(BaseModel):
@@ -382,6 +421,16 @@ class TTSOutput(BaseModel):
     episode_id: str
     generated_at: datetime
     lines: list[TTSLine]
+    # "dialogue": ElevenLabs' text_to_dialogue endpoint synthesized the whole
+    # script (whole or per-chunk) as one continuous conversation, then each
+    # line's own clip was sliced out via the endpoint's voice_segments
+    # timestamps — natural inter-turn pacing is already embedded in the
+    # clips. "per_line": the endpoint wasn't available/failed, and every
+    # line was synthesized independently instead — stitch_stage must add its
+    # own pause_ms-based gap between lines. See docs/decisions.md ("Voice
+    # and dynamics pass").
+    synthesis_mode: str
+    total_characters: int  # sum of TTSLine.characters, for cost tracking
 
 
 class StitchOutput(BaseModel):

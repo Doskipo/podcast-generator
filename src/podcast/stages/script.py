@@ -42,6 +42,15 @@ logger = logging.getLogger(__name__)
 ARTICLE_TEXT_CHARS = 1500
 
 
+def supports_audio_tags(model_id: str) -> bool:
+    """Whether `model_id` understands bracketed audio tags like "[laughs]"
+    (a v3-class ElevenLabs model). A simple name check, not a capability
+    lookup — there's no API to ask "does this model support tags," so this
+    is the same heuristic tts.py itself would need if it had to decide
+    without just trying it."""
+    return "v3" in model_id.lower()
+
+
 def flatten_lines(script: Script) -> list[Line]:
     """Cold open, then every segment's lines in order, then the outro — the
     canonical line order shared by tts_stage (segment filenames) and
@@ -114,16 +123,38 @@ def _render_outline_story(story: OutlineStory, recurring_bits_by_id: dict[str, R
     )
 
 
+def _laughter_instruction(tags_supported: bool) -> str:
+    if tags_supported:
+        return (
+            "- Laughter goes inside a line as a bracketed audio tag, e.g. \"[laughs] No, "
+            "seriously —\" — never a standalone line like \"Ha.\" on its own."
+        )
+    return (
+        "- Laughter is a spoken reaction word inside a longer line (\"Ha, no, seriously —\"), "
+        "not a standalone line like \"Ha.\" on its own, and not a bracketed tag (this "
+        "synthesis setup doesn't support audio tags)."
+    )
+
+
 def _build_prompts(profile: Profile, outline: Outline, articles: list[Article]) -> tuple[str, str]:
     podcast = profile.podcast
     host_a, host_b = podcast.hosts[0], podcast.hosts[1]
     target_words = podcast.duration_minutes * 150
     known_ids = ", ".join(a.source_id for a in articles)
     recurring_bits_by_id = {bit.effective_id: bit for bit in podcast.recurring_bits}
+    tags_supported = supports_audio_tags(profile.tts.model_id) or supports_audio_tags(profile.tts.dialogue_model_id)
 
     persona_block = (
         f"{host_a.name} (home turf: {', '.join(host_a.home_turf) or 'general'}):\n{host_a.persona}\n\n"
         f"{host_b.name} (home turf: {', '.join(host_b.home_turf) or 'general'}):\n{host_b.persona}"
+    )
+
+    delivery_line = (
+        "- Set `delivery` on a line to a short descriptor (\"laughs\", \"sighs\", \"deadpan\", "
+        "\"amused\", \"whispers\", \"excited\") when it adds something tts wouldn't otherwise "
+        "convey — most lines should leave it null.\n"
+        if tags_supported
+        else ""
     )
 
     system_prompt = (
@@ -133,9 +164,21 @@ def _build_prompts(profile: Profile, outline: Outline, articles: list[Article]) 
         f"Style:\n{_style_instructions(podcast.style)}\n\n"
         f"Tone: {podcast.tone}.\n\n"
         "Hard rules:\n"
+        f"- The cold open must identify the show and both hosts in one breath — a single "
+        f"short line naming \"{podcast.name}\" and introducing {host_a.name} and "
+        f"{host_b.name}, not a longer preamble.\n"
         "- The hosts are not an interviewer and an interviewee. Either host can lead a "
         "story, disagree with the other, interrupt with a short reaction, or take a "
         "brief tangent and come back to the story.\n"
+        "- A host may cut in mid-thought with a short interjection ('Wait—', 'Hold on,', "
+        "'Right, but—') instead of always waiting for a full sentence to finish. A line "
+        "that trails off or gets cut in on should end with an em dash (—), never a period "
+        "or ellipsis.\n"
+        "- Reactions should be emotional ('Oh no.', 'Wait, really?', 'That's wild.'), not "
+        "evaluative filler ('That's interesting.', 'Good point.') — react like a person, "
+        "not a critic.\n"
+        "- The word 'Correct.' as a standalone reaction may appear at most once in the "
+        "whole episode — vary how agreement gets expressed elsewhere.\n"
         "- Each segment must follow its outline entry's angle below: bring out why it "
         "matters and the tension or surprise, let the host it names take the lead, and "
         "use the tangent naturally if it fits the moment.\n"
@@ -155,8 +198,11 @@ def _build_prompts(profile: Profile, outline: Outline, articles: list[Article]) 
         "- Never say 'the article' or 'the paper' when citing a source — attribute the "
         "claim to the actual actor (the named researcher, company, or organization) or, "
         "if nothing specific fits, call it 'the report'.\n"
-        "- Laughter and reactions are short spoken words ('ha', 'oh wow', 'right?') — "
-        "never stage directions or bracketed cues like [laughs].\n"
+        f"{_laughter_instruction(tags_supported)}\n"
+        "- Set `pause_ms` on a line deliberately: ~100-200ms for a quick back-and-forth "
+        "exchange, ~600-900ms for a beat of silence — reserve the long end for right "
+        "before the recurring bit starts or right before a reveal, not routinely.\n"
+        f"{delivery_line}"
         "- Every factual claim must come from the text of the cited sources. Never "
         "invent facts not present in the sources.\n"
         f"- Every segment's source_ids must be a subset of the known ids: {known_ids}\n"

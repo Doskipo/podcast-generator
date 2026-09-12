@@ -39,6 +39,7 @@ def _profile(interests: list[Interest], duration_minutes: int = 8) -> Profile:
         name="Test",
         interests=interests,
         podcast=PodcastSettings(
+            name="Test Podcast",
             duration_minutes=duration_minutes,
             listener=Listener(name="Eudald"),
             hosts=[

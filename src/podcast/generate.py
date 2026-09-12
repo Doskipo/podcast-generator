@@ -122,7 +122,10 @@ def _run_outline_through_critique(
 
 def _run_tts_and_stitch(episode: Episode, script_output: ScriptOutput, until: str | None = None) -> None:
     tts_output = tts_stage(episode, script_output)
-    print(f"episode {episode.episode_id}: synthesized {len(tts_output.lines)} lines")
+    print(
+        f"episode {episode.episode_id}: synthesized {len(tts_output.lines)} lines via "
+        f"{tts_output.synthesis_mode} mode ({tts_output.total_characters} characters)"
+    )
     if until == "tts":
         return
 

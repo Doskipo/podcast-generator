@@ -40,6 +40,7 @@ def _profile() -> Profile:
         interests=[Interest(topic="testing", weight=1.0)],
         feeds=["https://example.com/feed.xml"],
         podcast=PodcastSettings(
+            name="Test Podcast",
             duration_minutes=8,
             listener=Listener(name="Eudald"),
             hosts=[_host("Nova"), _host("Max")],
@@ -179,3 +180,37 @@ def test_flatten_lines_order():
         "Tell me more.",
         "See you next time.",
     ]
+
+
+def test_supports_audio_tags():
+    assert script_module.supports_audio_tags("eleven_v3") is True
+    assert script_module.supports_audio_tags("eleven_turbo_v2_5") is False
+
+
+def test_build_prompts_states_cold_open_identification_rule(tmp_path):
+    profile = _profile()
+    outline_output = _outline_output("ep1", "abcd1234")
+    articles = [_article("abcd1234")]
+
+    system_prompt, _user_prompt = script_module._build_prompts(profile, outline_output.outline, articles)
+
+    assert profile.podcast.name in system_prompt
+    assert "one breath" in system_prompt
+    assert profile.podcast.hosts[0].name in system_prompt
+    assert profile.podcast.hosts[1].name in system_prompt
+
+
+def test_build_prompts_laughter_instruction_depends_on_tag_support():
+    profile_v3 = _profile()  # default hosts use tts.model_id="eleven_v3" from Profile defaults
+    outline_output = _outline_output("ep1", "abcd1234")
+    articles = [_article("abcd1234")]
+
+    system_prompt, _ = script_module._build_prompts(profile_v3, outline_output.outline, articles)
+    assert "[laughs]" in system_prompt
+
+    profile_no_tags = _profile()
+    profile_no_tags.tts.model_id = "eleven_turbo_v2_5"
+    profile_no_tags.tts.dialogue_model_id = "eleven_turbo_v2_5"
+    system_prompt_no_tags, _ = script_module._build_prompts(profile_no_tags, outline_output.outline, articles)
+    assert "[laughs]" not in system_prompt_no_tags
+    assert "spoken reaction word" in system_prompt_no_tags
