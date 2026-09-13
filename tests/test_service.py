@@ -18,8 +18,10 @@ from sqlmodel import Session, SQLModel, create_engine, select
 from podcast import db, service
 from podcast.models import (
     Angle,
+    Article,
     Critique,
     CritiqueOutput,
+    Episode,
     FetchOutput,
     Host,
     HostStance,
@@ -30,6 +32,7 @@ from podcast.models import (
     OutlineStory,
     PodcastSettings,
     Profile,
+    RankedArticle,
     RankOutput,
     Script,
     ScriptOutput,
@@ -77,6 +80,21 @@ def _patch_episode_dir(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(service, "episode_dir", _episode_dir)
 
 
+def _article(source_id: str = "abcd1234") -> Article:
+    now = datetime.now(timezone.utc)
+    return Article(
+        source_id=source_id,
+        url=f"https://example.com/{source_id}",
+        title="A real article",
+        feed_url="https://example.com/feed.xml",
+        published_at=now,
+        fetched_at=now,
+        summary="a summary",
+        text="Full text.",
+        interest="testing",
+    )
+
+
 def _patch_stages(monkeypatch, calls: list[str]) -> None:
     def fake_fetch_stage(profile, episode_id):
         calls.append("fetch")
@@ -84,14 +102,15 @@ def _patch_stages(monkeypatch, calls: list[str]) -> None:
 
     def fake_rank_stage(episode, fetch_output, client=None):
         calls.append("rank")
+        article = _article()
         return RankOutput(
             episode_id=episode.episode_id,
             ranked_at=datetime.now(timezone.utc),
             model="test-model",
             total_budget=1,
             backfilled=0,
-            scored=[],
-            selected=[],
+            scored=[RankedArticle(article=article, interest="testing", score=0.9, reason="on topic", selected=True)],
+            selected=[article],
         )
 
     def fake_outline_stage(episode, rank_output, client=None):
@@ -267,6 +286,118 @@ def test_run_episode_marks_failed_on_stage_exception_and_reraises(tmp_path, monk
     assert len(failed_events) == 1
     assert failed_events[0].metadata_json["stage"] == "outline"
     assert failed_events[0].metadata_json["error"] == "boom"
+
+
+def test_run_episode_stops_at_no_content_when_rank_selects_nothing(tmp_path, monkeypatch):
+    calls: list[str] = []
+    _patch_stages(monkeypatch, calls)
+    _patch_episode_dir(monkeypatch, tmp_path)
+    _configure_test_db(monkeypatch, tmp_path)
+
+    def fake_rank_stage_empty(episode, fetch_output, client=None):
+        calls.append("rank")
+        return RankOutput(
+            episode_id=episode.episode_id,
+            ranked_at=datetime.now(timezone.utc),
+            model="test-model",
+            total_budget=1,
+            backfilled=0,
+            scored=[],  # nothing was even scored — every interest came up empty
+            selected=[],
+        )
+
+    monkeypatch.setattr(service, "rank_stage", fake_rank_stage_empty)
+
+    profile = _profile()
+    with db.session_scope() as session:
+        profile_id = _seed_profile(session, profile)
+
+    episode_id = service.run_episode(profile, profile_id, episode_id="ep11")
+
+    # Pipeline stopped: outline/script/critique/tts/stitch never ran.
+    assert calls == ["fetch", "rank"]
+
+    with db.session_scope() as session:
+        record = session.exec(select(db.EpisodeRecord).where(db.EpisodeRecord.episode_id == episode_id)).first()
+        events = session.exec(
+            select(db.EventRecord).where(db.EventRecord.episode_id == episode_id).order_by(db.EventRecord.id)
+        ).all()
+
+    assert record.status == "no_content"
+    assert record.no_content_interests == ["testing"]  # the profile's one interest, zero candidates
+    event_types = [e.type for e in events]
+    assert event_types == ["generated", "stage_done", "stage_done", "no_content"]  # fetch, rank, then no_content
+    no_content_event = next(e for e in events if e.type == "no_content")
+    assert no_content_event.metadata_json["interests"] == ["testing"]
+
+
+def test_run_episode_no_content_only_lists_interests_that_truly_had_zero_candidates(tmp_path, monkeypatch):
+    """An interest that *did* have scored candidates isn't blamed just
+    because none of them ended up selected — only interests absent from
+    rank_output.scored entirely count as "no candidates"."""
+    calls: list[str] = []
+    _patch_stages(monkeypatch, calls)
+    _patch_episode_dir(monkeypatch, tmp_path)
+    _configure_test_db(monkeypatch, tmp_path)
+
+    def fake_rank_stage_scored_but_unselected(episode, fetch_output, client=None):
+        calls.append("rank")
+        article = _article()
+        return RankOutput(
+            episode_id=episode.episode_id,
+            ranked_at=datetime.now(timezone.utc),
+            model="test-model",
+            total_budget=1,
+            backfilled=0,
+            scored=[RankedArticle(article=article, interest="testing", score=0.1, reason="weak", selected=False)],
+            selected=[],  # scored, but nothing cleared the bar
+        )
+
+    monkeypatch.setattr(service, "rank_stage", fake_rank_stage_scored_but_unselected)
+
+    profile = _profile()
+    with db.session_scope() as session:
+        profile_id = _seed_profile(session, profile)
+
+    episode_id = service.run_episode(profile, profile_id, episode_id="ep12")
+
+    with db.session_scope() as session:
+        record = session.exec(select(db.EpisodeRecord).where(db.EpisodeRecord.episode_id == episode_id)).first()
+
+    assert record.status == "no_content"
+    assert record.no_content_interests == []  # "testing" was scored, just not selected
+
+
+def test_resume_from_rank_also_stops_at_no_content(tmp_path, monkeypatch):
+    _configure_test_db(monkeypatch, tmp_path)
+    _patch_episode_dir(monkeypatch, tmp_path)
+    calls: list[str] = []
+    _patch_stages(monkeypatch, calls)
+
+    profile = _profile()
+    with db.session_scope() as session:
+        profile_id = _seed_profile(session, profile)
+
+    episode = Episode(episode_id="ep13", created_at=datetime.now(timezone.utc), profile=profile)
+    empty_rank_output = RankOutput(
+        episode_id="ep13",
+        ranked_at=datetime.now(timezone.utc),
+        model="test-model",
+        total_budget=1,
+        backfilled=0,
+        scored=[],
+        selected=[],
+    )
+
+    with db.session_scope() as session:
+        record = service.get_or_create_episode_record(session, "ep13", profile_id)
+        episode_id = service.resume_from_rank(session, record, episode, empty_rank_output, until=None)
+
+    assert calls == []  # outline_stage (etc.) never got the chance
+    with db.session_scope() as session:
+        record = session.exec(select(db.EpisodeRecord).where(db.EpisodeRecord.episode_id == episode_id)).first()
+    assert record.status == "no_content"
+    assert record.no_content_interests == ["testing"]
 
 
 def test_upsert_profile_is_idempotent(tmp_path, monkeypatch):

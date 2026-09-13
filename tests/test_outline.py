@@ -263,10 +263,10 @@ def test_outline_stage_passes_effective_ids_to_generate_outline(tmp_path, monkey
     assert output.outline.stories[0].recurring_bit == "the-logistical-pin-drop"
 
 
-_STANCE_DICTS = [
-    {"host": "Nova", "attitude": "excited", "why": "her home turf", "arc": None},
-    {"host": "Max", "attitude": "skeptical", "why": "wants the numbers", "arc": None},
-]
+_STANCE_OBJECT = {
+    "Nova": {"attitude": "excited", "why": "her home turf", "arc": None},
+    "Max": {"attitude": "skeptical", "why": "wants the numbers", "arc": None},
+}
 
 
 def test_response_model_constrains_recurring_bit_to_known_ids():
@@ -276,7 +276,7 @@ def test_response_model_constrains_recurring_bit_to_known_ids():
         "headline": "h",
         "source_ids": ["a"],
         "angle": {"why_it_matters": "w", "tension_or_surprise": "t", "host_take": "h", "tangent": "a"},
-        "stances": _STANCE_DICTS,
+        "stances": _STANCE_OBJECT,
     }
 
     # a known id validates
@@ -300,14 +300,18 @@ def test_response_model_forces_null_when_no_bits_configured():
         "headline": "h",
         "source_ids": ["a"],
         "angle": {"why_it_matters": "w", "tension_or_surprise": "t", "host_take": "h", "tangent": "a"},
-        "stances": _STANCE_DICTS,
+        "stances": _STANCE_OBJECT,
     }
 
     with pytest.raises(ValueError):
         model.model_validate({"title": "t", "stories": [{**story, "recurring_bit": "anything"}]})
 
 
-def test_response_model_constrains_stance_host_to_known_names():
+def test_response_model_stances_is_an_object_with_one_required_field_per_host():
+    """The structural fix: stances isn't list[{host, ...}] (a shape a model
+    can duplicate/omit a host in) — it's an object with a required field
+    named after each host, so "exactly one stance per host" is true by
+    construction, not just checked afterward."""
     model = outline_module._response_model([], ["Nova", "Max"])
 
     story = {
@@ -316,12 +320,15 @@ def test_response_model_constrains_stance_host_to_known_names():
         "angle": {"why_it_matters": "w", "tension_or_surprise": "t", "host_take": "h", "tangent": "a"},
     }
 
-    ok = model.model_validate({"title": "t", "stories": [{**story, "stances": _STANCE_DICTS}]})
-    assert [s.host for s in ok.stories[0].stances] == ["Nova", "Max"]
+    ok = model.model_validate({"title": "t", "stories": [{**story, "stances": _STANCE_OBJECT}]})
+    assert ok.stories[0].stances.Nova.attitude == "excited"
+    assert ok.stories[0].stances.Max.attitude == "skeptical"
 
-    bad_stances = [{"host": "Carol", "attitude": "excited", "why": "x", "arc": None}]
+    # missing a required host's stance — schema-level rejection, the same
+    # way an invalid recurring bit id is, not left to _validate_outline alone
+    missing_max = {"Nova": _STANCE_OBJECT["Nova"]}
     with pytest.raises(ValueError):
-        model.model_validate({"title": "t", "stories": [{**story, "stances": bad_stances}]})
+        model.model_validate({"title": "t", "stories": [{**story, "stances": missing_max}]})
 
 
 def test_outline_stage_rejects_a_segment_with_both_bit_and_tangent(tmp_path, monkeypatch):
@@ -428,4 +435,97 @@ def test_outline_stage_rejects_missing_stance_for_a_host(tmp_path, monkeypatch):
     _patch_episode_dir(monkeypatch, tmp_path)
 
     with pytest.raises(ValueError, match="exactly one stance per host"):
+        outline_module.outline_stage(episode, rank_output, client=object())
+
+
+def test_outline_stage_retries_once_then_succeeds_after_a_bad_outline(tmp_path, monkeypatch):
+    """See docs/decisions.md ("One-retry-with-feedback"): a validation
+    failure gets exactly one retry, with the error fed back into the
+    prompt, before the stage gives up."""
+    profile = _profile()
+    episode = _episode(profile)
+    articles = [_article("abcd1234")]
+    rank_output = _rank_output(episode.episode_id, articles)
+
+    invalid_outline = Outline(
+        title="Bad",
+        stories=[
+            OutlineStory(
+                headline="Something happened",
+                source_ids=["abcd1234"],
+                angle=_angle(tangent=None),
+                stances=[HostStance(host="Nova", attitude="excited", why="her home turf")],  # Max missing
+            )
+        ],
+    )
+    valid_outline = Outline(
+        title="Good",
+        stories=[
+            OutlineStory(
+                headline="Something happened",
+                source_ids=["abcd1234"],
+                angle=_angle(tangent=None),
+                stances=_stances(),
+            )
+        ],
+    )
+
+    prompts: list[str] = []
+
+    def fake_generate_outline(client, model, system_prompt, user_prompt, bit_ids, host_names):
+        prompts.append(user_prompt)
+        return invalid_outline if len(prompts) == 1 else valid_outline
+
+    monkeypatch.setattr(outline_module, "_generate_outline", fake_generate_outline)
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    output = outline_module.outline_stage(episode, rank_output, client=object())
+
+    assert output.outline.title == "Good"
+    assert len(prompts) == 2
+    assert prompts[0] == prompts[1].split("\n\nYour previous response was invalid:")[0]  # original kept intact
+    assert "exactly one stance per host" in prompts[1]  # the validation error, fed back verbatim
+
+
+def test_outline_stage_raises_after_a_second_failed_validation(tmp_path, monkeypatch):
+    profile = _profile()
+    episode = _episode(profile)
+    articles = [_article("abcd1234")]
+    rank_output = _rank_output(episode.episode_id, articles)
+
+    always_invalid = Outline(
+        title="Bad",
+        stories=[
+            OutlineStory(
+                headline="Something happened",
+                source_ids=["abcd1234"],
+                angle=_angle(tangent=None),
+                stances=[HostStance(host="Nova", attitude="excited", why="her home turf")],
+            )
+        ],
+    )
+
+    prompts: list[str] = []
+
+    def fake_generate_outline(client, model, system_prompt, user_prompt, bit_ids, host_names):
+        prompts.append(user_prompt)
+        return always_invalid
+
+    monkeypatch.setattr(outline_module, "_generate_outline", fake_generate_outline)
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    with pytest.raises(ValueError, match="exactly one stance per host"):
+        outline_module.outline_stage(episode, rank_output, client=object())
+
+    assert len(prompts) == 2  # exactly one retry, no more
+
+
+def test_outline_stage_refuses_zero_selected_articles(monkeypatch):
+    profile = _profile()
+    episode = _episode(profile)
+    rank_output = _rank_output(episode.episode_id, [])
+
+    # No _generate_outline patch needed — the stage must reject before ever
+    # calling the model.
+    with pytest.raises(ValueError, match="zero sources"):
         outline_module.outline_stage(episode, rank_output, client=object())

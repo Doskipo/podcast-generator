@@ -16,11 +16,14 @@ server. The DB row ends up correct either way.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import TypeVar
 
+import yaml
+from pydantic import ValidationError
 from sqlmodel import Session, select
 
 from podcast import db
@@ -53,6 +56,48 @@ T = TypeVar("T")
 # Illustrative placeholder — no real ElevenLabs pricing lives anywhere in
 # this codebase (see docs/decisions.md). Do not treat as an accurate bill.
 COST_PER_1K_CHARS_USD = 0.18
+
+# Env var read at seed time (not import time), so tests/tools can set it
+# per-call via monkeypatch.setenv without needing to reimport this module.
+PROFILE_PATH_ENV_VAR = "PODCAST_PROFILE_PATH"
+DEFAULT_PROFILE_PATH = "profiles/eudald.yaml"
+
+
+def seed_profile_from_yaml_if_empty(session: Session, path: str | None = None) -> db.ProfileRecord | None:
+    """Called once from the API's startup lifespan (api/app.py): if the
+    profiles table is empty, load a profile from `path` (or
+    $PODCAST_PROFILE_PATH, default profiles/eudald.yaml) and seed it — a
+    fresh data/podcast.db comes up already configured instead of GET
+    /profile 404-ing until someone PUTs one by hand. Never overwrites an
+    existing row; see import_profile_overwrite for that. Missing file or a
+    profile that fails validation (e.g. the two-hosts rule) is logged and
+    skipped, not raised — a bad default file shouldn't crash the app at
+    startup. Returns the seeded row, or None if nothing was seeded."""
+    if session.exec(select(db.ProfileRecord)).first() is not None:
+        return None
+
+    profile_path = path or os.environ.get(PROFILE_PATH_ENV_VAR, DEFAULT_PROFILE_PATH)
+    try:
+        profile = Profile.from_yaml(profile_path)
+    except (OSError, yaml.YAMLError, ValidationError) as exc:
+        logger.warning("startup: no profile in DB and could not seed from %r: %s", profile_path, exc)
+        return None
+
+    row = upsert_profile(profile, session)
+    logger.info("startup: seeded profiles table from %s", profile_path)
+    return row
+
+
+def import_profile_overwrite(session: Session, path: str) -> db.ProfileRecord:
+    """`uv run podcast import-profile <path>` — load a profile YAML and
+    overwrite the DB's profiles row regardless of what's already there.
+    Unlike seed_profile_from_yaml_if_empty, this is an explicit,
+    user-triggered action: a missing file or a profile that fails
+    validation raises straight through rather than being logged and
+    skipped, so the CLI exits with a clear error instead of silently
+    no-op'ing."""
+    profile = Profile.from_yaml(path)
+    return upsert_profile(profile, session)
 
 
 def upsert_profile(profile: Profile, session: Session) -> db.ProfileRecord:
@@ -166,6 +211,37 @@ def _step_rank(
         f"of budget {rank_output.total_budget} articles ({rank_output.backfilled} backfilled)"
     )
     return None if until == "rank" else rank_output
+
+
+def _check_grounding(session: Session, record: db.EpisodeRecord, episode: Episode, rank_output: RankOutput) -> bool:
+    """After rank succeeds, refuse to continue building an episode from zero
+    selected articles — handing outline/script nothing to ground on leaves
+    them nothing to write about except invention (this exact failure mode —
+    a dead placeholder feed leaving one interest, and the whole run, with
+    zero candidates — is what this guard was added for; see
+    docs/decisions.md, "Grounding guard"). `outline_stage` itself also
+    refuses zero sources as a backstop, but stopping here means the episode
+    gets an honest `no_content` status instead of a `failed` one, with the
+    empty interests recorded for the UI to show. Returns False (and has
+    already updated `record`/emitted the event) when there's nothing to
+    build on; True otherwise."""
+    if rank_output.selected:
+        return True
+
+    scored_topics = {ra.interest for ra in rank_output.scored if ra.interest}
+    empty_interests = [i.topic for i in episode.profile.interests if i.topic not in scored_topics]
+
+    record.status = "no_content"
+    record.no_content_interests = empty_interests
+    session.add(record)
+    session.commit()
+    emit_event(session, episode.episode_id, "no_content", {"interests": empty_interests})
+    logger.warning(
+        "episode %s: rank selected zero articles; interests with no candidates: %s",
+        episode.episode_id,
+        empty_interests,
+    )
+    return False
 
 
 def _step_outline(
@@ -316,6 +392,8 @@ def run_episode(profile: Profile, profile_id: int, episode_id: str | None = None
         rank_output = _step_rank(session, record, episode, fetch_output, until)
         if rank_output is None:
             return episode_id
+        if not _check_grounding(session, record, episode, rank_output):
+            return episode_id
 
         critique_output = _run_outline_through_critique(session, record, episode, rank_output, until)
         if critique_output is None:
@@ -343,6 +421,8 @@ def resume_from_fetch(
     rank_output = _step_rank(session, record, episode, fetch_output, until)
     if rank_output is None:
         return episode.episode_id
+    if not _check_grounding(session, record, episode, rank_output):
+        return episode.episode_id
 
     critique_output = _run_outline_through_critique(session, record, episode, rank_output, until)
     if critique_output is None:
@@ -365,6 +445,9 @@ def resume_from_rank(
     session.add(record)
     session.commit()
     start = time.monotonic()
+
+    if not _check_grounding(session, record, episode, rank_output):
+        return episode.episode_id
 
     critique_output = _run_outline_through_critique(session, record, episode, rank_output, until)
     if critique_output is None:

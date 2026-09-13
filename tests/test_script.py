@@ -163,6 +163,53 @@ def test_script_stage_rejects_unknown_source_ids(tmp_path, monkeypatch):
         script_module.script_stage(episode, outline_output, articles, client=object())
 
 
+def test_script_stage_retries_once_then_succeeds_after_bad_source_ids(tmp_path, monkeypatch):
+    """See docs/decisions.md ("One-retry-with-feedback")."""
+    profile = _profile()
+    episode = _episode(profile)
+    articles = [_article("abcd1234")]
+    outline_output = _outline_output(episode.episode_id, "abcd1234")
+
+    bad_script = _fixture_script("unknown99")
+    good_script = _fixture_script("abcd1234")
+    prompts: list[str] = []
+
+    def fake_generate_script(client, model, system_prompt, user_prompt):
+        prompts.append(user_prompt)
+        return bad_script if len(prompts) == 1 else good_script
+
+    monkeypatch.setattr(script_module, "_generate_script", fake_generate_script)
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    output = script_module.script_stage(episode, outline_output, articles, client=object())
+
+    assert output.script.segments[0].source_ids == ["abcd1234"]
+    assert len(prompts) == 2
+    assert "unknown99" in prompts[1]  # the validation error, fed back verbatim
+
+
+def test_script_stage_raises_after_a_second_failed_validation(tmp_path, monkeypatch):
+    profile = _profile()
+    episode = _episode(profile)
+    articles = [_article("abcd1234")]
+    outline_output = _outline_output(episode.episode_id, "abcd1234")
+
+    always_bad = _fixture_script("unknown99")
+    prompts: list[str] = []
+
+    def fake_generate_script(client, model, system_prompt, user_prompt):
+        prompts.append(user_prompt)
+        return always_bad
+
+    monkeypatch.setattr(script_module, "_generate_script", fake_generate_script)
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    with pytest.raises(ValueError):
+        script_module.script_stage(episode, outline_output, articles, client=object())
+
+    assert len(prompts) == 2  # exactly one retry, no more
+
+
 def test_script_stage_requires_openai_api_key(tmp_path, monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     _patch_episode_dir(monkeypatch, tmp_path)

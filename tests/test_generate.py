@@ -104,3 +104,38 @@ def test_run_lets_a_stage_failure_propagate(tmp_path, monkeypatch, capsys):
 
     with pytest.raises(RuntimeError, match="stage exploded"):
         generate_module.run(str(profile_path))
+
+
+def test_import_profile_overwrites_the_db_profile(tmp_path, monkeypatch, capsys):
+    profile_path = tmp_path / "profile.yaml"
+    _write_profile(profile_path)
+    _configure_test_db(monkeypatch, tmp_path)
+
+    with db.session_scope() as session:
+        service.upsert_profile(Profile.from_yaml(profile_path).model_copy(update={"name": "Old"}), session)
+
+    monkeypatch.setattr("sys.argv", ["podcast", "import-profile", str(profile_path)])
+    generate_module.import_profile()
+
+    with db.session_scope() as session:
+        rows = session.exec(select(db.ProfileRecord)).all()
+    assert len(rows) == 1
+    assert rows[0].name == "Test"  # overwritten from the YAML, not "Old"
+
+    out = capsys.readouterr().out
+    assert "Test" in out
+    assert str(profile_path) in out
+
+
+def test_main_dispatches_import_profile(tmp_path, monkeypatch):
+    profile_path = tmp_path / "profile.yaml"
+    _write_profile(profile_path)
+    _configure_test_db(monkeypatch, tmp_path)
+
+    called = {}
+    monkeypatch.setattr(generate_module, "import_profile", lambda: called.setdefault("ran", True))
+    monkeypatch.setattr("sys.argv", ["podcast", "import-profile", str(profile_path)])
+
+    generate_module.main()
+
+    assert called.get("ran") is True

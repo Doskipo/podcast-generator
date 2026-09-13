@@ -316,6 +316,68 @@ def test_critique_stage_uses_stronger_model(tmp_path, monkeypatch):
     assert output.model != profile.llm.model
 
 
+def test_critique_stage_retries_once_then_succeeds_after_bad_grounding(tmp_path, monkeypatch):
+    """See docs/decisions.md ("One-retry-with-feedback"). `_apply_critique`
+    never actually touches source_ids (grounding is safe by construction —
+    see its own docstring), so a real critique can't organically trigger
+    this path; `validate_source_ids` is faked directly here to exercise the
+    retry wiring in isolation from that guarantee."""
+    profile = _profile()
+    episode = _episode(profile)
+    articles = [_article("abcd1234")]
+    script_output = _script_output(episode.episode_id, "abcd1234")
+    outline_output = _outline_output(episode.episode_id, "abcd1234")
+
+    prompts: list[str] = []
+    validate_calls = {"n": 0}
+
+    def fake_generate_critique(client, model, system_prompt, user_prompt):
+        prompts.append(user_prompt)
+        return Critique(flags=[])
+
+    def fake_validate_source_ids(script, known_ids):
+        validate_calls["n"] += 1
+        if validate_calls["n"] == 1:
+            raise ValueError("unknown-id-xyz")
+
+    monkeypatch.setattr(critique_module, "_generate_critique", fake_generate_critique)
+    monkeypatch.setattr(critique_module, "validate_source_ids", fake_validate_source_ids)
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    output = critique_module.critique_stage(episode, script_output, articles, outline_output, client=object())
+
+    assert output.revised_script.title == "Test Episode"
+    assert len(prompts) == 2
+    assert validate_calls["n"] == 2
+    assert "unknown-id-xyz" in prompts[1]  # the validation error, fed back verbatim
+
+
+def test_critique_stage_raises_after_a_second_failed_validation(tmp_path, monkeypatch):
+    profile = _profile()
+    episode = _episode(profile)
+    articles = [_article("abcd1234")]
+    script_output = _script_output(episode.episode_id, "abcd1234")
+    outline_output = _outline_output(episode.episode_id, "abcd1234")
+
+    prompts: list[str] = []
+
+    def fake_generate_critique(client, model, system_prompt, user_prompt):
+        prompts.append(user_prompt)
+        return Critique(flags=[])
+
+    def always_fails(script, known_ids):
+        raise ValueError("still ungrounded")
+
+    monkeypatch.setattr(critique_module, "_generate_critique", fake_generate_critique)
+    monkeypatch.setattr(critique_module, "validate_source_ids", always_fails)
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    with pytest.raises(ValueError, match="still ungrounded"):
+        critique_module.critique_stage(episode, script_output, articles, outline_output, client=object())
+
+    assert len(prompts) == 2  # exactly one retry, no more
+
+
 def test_critique_stage_requires_openai_api_key(tmp_path, monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     _patch_episode_dir(monkeypatch, tmp_path)

@@ -919,3 +919,205 @@ this exact stack.
   level up: monkeypatching `podcast.paths.EPISODES_DIR` itself (rather than each module's own
   imported `episode_dir` name) so every caller — `service.py`, `routes_episodes.py`, a test's own
   fake pipeline — agrees on one temp directory regardless of which module holds the reference.
+
+## User-facing UI: Vite + React, served by FastAPI — 2026-09-13
+Added `web/` (Vite + React + Tailwind v4 + react-router-dom), three routes (`/settings`,
+`/episodes`, `/dashboard`), a small backend addition (`POST /interests/suggest`, `GET /voices`),
+and `uv run podcast serve` to run the API (+ built UI). Full routes/state-flow writeup in
+`docs/ui.md`; this entry is the trade-offs.
+
+- **Why React over server-rendered.** The three pages are genuinely stateful client-side:
+  sliders that update live, a settings form with per-row "Suggest" calls that shouldn't reload
+  the page, an episode list that polls and an audio player wired to fire events on play/end.
+  Hand-rolled DOM updates or a template-per-request server-rendered approach would mean
+  re-implementing most of what a component model gives for free (local component state,
+  re-render-on-change, event handlers) with more code, not less — and the app is small enough
+  (3 routes, no SEO/first-paint requirement, single user) that SSR/Next.js-style complexity buys
+  nothing here. A static SPA served by the same FastAPI app that already serves the API was the
+  simplest thing that actually fits the interactivity the task asked for.
+- **Why polling over websockets** (`Episodes.jsx`'s `refresh()` loop). Episode generation takes
+  minutes (real LLM + TTS calls), there's exactly one user, and the UI only needs a status board,
+  not sub-second updates — a 3-second re-fetch of `GET /episodes`, running only while something is
+  actually `pending`/`running` (stops scheduling itself once everything settles), is simpler than
+  standing up a websocket endpoint, connection lifecycle, and a server-side pub-sub to push
+  `stage_done` events to a browser tab — infrastructure this app's own background-task/no-queue
+  design (see the SQLite/FastAPI/APScheduler entry above) doesn't have anywhere to plug into
+  cheaply anyway. Trade-off: up to ~3s of staleness and one wasted request per tick once idle for
+  as long as any episode is in flight — acceptable at this scale, revisit if the dashboard ever
+  needs live per-stage progress or there's more than one concurrent viewer.
+- **Interest suggestions reuse the fetch-stage seam, not a new call site.** `stages/fetch.py`
+  already isolates its OpenAI calls behind small functions (`_generate_queries`); `suggest_interest`
+  / `_generate_suggestion` follow the same pattern (structured output, same seam tests
+  monkeypatch) and share `InterestSuggestion`/`NUM_GENERATED_QUERIES` rather than duplicating the
+  prompt-building logic — one LLM call drafts both the description and the queries, at the same
+  cost the queries-only call already had (noted as a "day 3" idea in this log's "Per-interest
+  batching" entry, now built).
+- **Voice catalog is a hardcoded list (`api/voices.py`), not a live ElevenLabs call.** No
+  `voices.list()`-shaped call exists anywhere in this codebase, and the "Voice and dynamics pass"
+  entry above already found this API key lacks some read permissions (`models_read`) — adding an
+  unverified live call for a picker with a handful of options isn't worth the risk of a runtime
+  surprise. Edit `VOICE_CATALOG` directly to add more voices.
+- **`PUT /profile` always sends the whole `Profile` object, no partial-update endpoint.** The
+  settings form loads the full profile into React state on mount and mutates it in place, so
+  fields the UI doesn't expose (`recurring_bits`, `feeds`, `llm`, `tts`, `fetch`) round-trip
+  untouched automatically — simpler than a PATCH endpoint plus client-side diffing, and correct
+  as long as the UI always loads before it saves (true here: there's no "blind" write path).
+- **CORS is permissive (fixed dev-origin allowlist, all methods/headers)** — needed only so the
+  Vite dev server (a different origin, `:5173`) can call the API during development; production
+  serves the SPA and the API from the same FastAPI origin, where none of this applies. Fine for a
+  single-user take-home; would need tightening (or dropping entirely, since same-origin serving
+  is already the production story) if this were ever exposed beyond localhost.
+- **SPA fallback verified against Starlette's actual `StaticFiles` behavior, not assumed.**
+  `StaticFiles(html=True)` alone does *not* serve `index.html` for an arbitrary unmatched path
+  like `/settings` — checked its `get_response` source directly: it only serves `index.html` for
+  `/` and real directories, 404 (or `404.html`) otherwise. `app.py` instead mounts `/assets`
+  separately and adds an explicit catch-all route (`@app.get("/{full_path:path}")`, registered
+  after every API router) that serves a real file when Vite emitted one there, else
+  `index.html` — the actual mechanism that lets a browser refresh on a client-side route work.
+
+## Three fixes from the first real run through the API — 2026-09-13
+
+### Grounding guard: caught by a dead placeholder feed
+The first real end-to-end run through the API — profile PUT'd via the new settings UI, "Generate
+now" clicked for real — produced an episode whose script talked around its topic in generic,
+made-up specifics instead of citing anything real. Cause, once traced: one of that profile's
+interests still had `feeds: ["https://example.com/feed.xml"]` (`example.com` is the internet's own
+canonical placeholder domain — this codebase's own test fixtures use it constantly, e.g.
+`tests/test_outline.py`'s `_article()` helper), so fetch found zero candidates for it, and it was
+in fact the *only* interest in the profile — rank therefore selected **zero articles overall**.
+Nothing in the pipeline stopped there: `outline_stage` happily ran with `rank_output.selected ==
+[]`, and the model, given no sources at all, filled the gap with invention. This is exactly the
+"never invent facts" rule (CLAUDE.md, day one) failing in the one case nobody had tried yet — a
+completely empty source list, as opposed to a merely thin one.
+
+Fix, two layers:
+1. **`podcast.service._check_grounding`**, called right after rank succeeds in `run_episode`,
+   `resume_from_fetch`, and `resume_from_rank` (every entrypoint that could reach outline with a
+   freshly- or previously-empty `rank_output`): if `rank_output.selected` is empty, the pipeline
+   stops *there* — episode `status="no_content"` (a new, non-error terminal status alongside
+   pending/running/done/failed), `EpisodeRecord.no_content_interests` set to the profile's
+   interest topics that had zero *scored* candidates (computed from `rank_output.scored`, not
+   `fetch_output`, so the same check works uniformly whether or not a `FetchOutput` is even in
+   scope — `resume_from_rank` only ever has the `RankOutput`), and a `no_content` event emitted.
+   Deliberately distinguishes "this interest had literally nothing this run" from "this interest
+   had candidates that just didn't make the cut" — a second no-content test in
+   `tests/test_service.py` locks in that a scored-but-unselected interest is *not* listed as
+   empty, since that's a different (and much less concerning) situation.
+2. **`outline_stage` itself now refuses to run with zero sources (raises `ValueError`)** — a
+   defensive backstop for any direct/bypassed call to the stage that doesn't go through
+   `service.py`'s guard, so "the pipeline can produce an episode grounded in nothing" is now
+   structurally impossible from either direction, not just prevented by the orchestration layer
+   remembering to check first.
+
+`no_content` surfaces in the Episodes UI as a distinct amber badge (not the red `failed` one) with
+the empty-interests list shown inline, plus a one-line explanation and a nudge toward the fix
+(widen that interest's window/queries in Settings) — this is an expected, sometimes-normal
+outcome (an interest genuinely having no fresh news this week, extensively documented earlier in
+this log), not a bug to alarm the user about.
+
+### Profile validation: exactly two hosts, each with a voice id
+Same first run also surfaced that nothing stopped a profile from being saved with a host missing a
+`voice_id`, or with one host, or three — `tts_stage` would only discover the problem deep in a
+paid pipeline run (raising on the first line whose speaker has no matching host), and the
+pipeline's whole design already assumes exactly two (script.py's `hosts[0]`-drives/`hosts[1]`-asks
+positional convention). Fixed with a `model_validator(mode="after")` directly on
+`PodcastSettings`, not a route-level check: enforced everywhere a `Profile` gets constructed or
+parsed — `PUT /profile` (FastAPI turns the raised `ValueError` into a 422 with the message intact,
+e.g. `"Value error, exactly two hosts are required, got 1"`), profile YAML loads (`Profile.from_yaml`,
+so `import-profile` and the CLI's own `run()` inherit it for free), and DB seeding (below). One
+model-level rule instead of duplicating the same two checks at every one of those call sites.
+
+### Seeding the profiles table from YAML on startup
+Before this, a fresh `data/podcast.db` left `GET /profile` 404-ing until someone PUT a profile by
+hand — fine for tests, awkward for actually running the app the first time. `api/app.py`'s
+lifespan now calls `service.seed_profile_from_yaml_if_empty(session)` right after `db.init_db()`:
+if the `profiles` table is empty, it loads `$PODCAST_PROFILE_PATH` (default
+`profiles/eudald.yaml`) and upserts it — **never** overwrites an existing row, so this only ever
+fires once, on a genuinely empty table. A missing/invalid default file is logged and skipped
+(`OSError`/`yaml.YAMLError`/`pydantic.ValidationError` all caught) rather than crashing the whole
+app at startup — a bad default shouldn't take down the API.
+
+`uv run podcast import-profile <path>` (new CLI subcommand, dispatched in `generate.py:main()` the
+same way `serve` is) is the explicit, always-overwrite counterpart —
+`service.import_profile_overwrite` loads and upserts unconditionally and lets any error (missing
+file, failed validation) propagate straight to the CLI, since an explicit user action should fail
+loudly rather than silently no-op like the startup path does. Both funnel through the same
+`service.upsert_profile`, so both get the host-count/voice-id validation above for free.
+
+**Test isolation fallout, worth flagging.** Every existing `tests/api/*.py` file's
+`_configure_test_db` helper now also sets `PODCAST_PROFILE_PATH` to a nonexistent path — without
+it, the new startup seeding was picking up the *real* `profiles/eudald.yaml` from the repo's
+working directory during test runs (it exists and validates fine), silently turning every "no
+profile yet" test assumption false the moment `TestClient(app)`'s lifespan ran. Caught immediately
+by 4 failing tests the same run this feature was added in; not a subtle bug, but a reminder that
+"seed from whatever's on disk by default" and "tests run from the real repo checkout" interact by
+default unless a test explicitly opts out.
+
+## Outline stance bug: structural schemas over post-hoc validation, and one-retry-with-feedback — 2026-09-13
+A real outline run failed `_validate_outline`'s "exactly one stance per host" check — the model
+had returned two stances for one host and none for the other. This was always a schema gap:
+`stances` was `list[HostStanceResponse]` with a `host: Literal[...]` field *inside* each item — the
+same shape already used, and already known to be fragile, for the pre-fix `recurring_bit` string
+match (see "Recurring bit id fix" above) and worse here, since nothing stopped the model
+duplicating one host's entry and dropping the other's. A `Literal` on `host` only constrains which
+*names* are legal per item; it says nothing about how many items, or which combination, the list
+as a whole contains.
+
+- **Fix: `stances` is no longer a list at all.** `outline.py:_response_model` now builds an object
+  with one *required* field per host name (`create_model("StancesResponse", **{name: (stance_model,
+  ...) for name in host_names})`) — `stance_model` itself drops the `host` field entirely (a
+  `{attitude, why, arc}` triple). A JSON object can't have a duplicate key and can't omit a
+  required one, so "exactly one stance per host" is now true by construction, the same way the
+  existing `Literal[tuple(bit_ids)]` on `recurring_bit` makes an invented bit id unrepresentable —
+  this fix just applies that same idea one level up, to a whole list's cardinality/coverage rather
+  than one field's value set. `outline.py:_convert_story` does the one bit of translation work this
+  needs: reading `story_response.stances.<host_name>` back into a `list[HostStance]` for the
+  canonical `Outline` (everything else in a response story still round-trips via dump/revalidate,
+  since only `stances`' shape actually changed). `_validate_outline`'s existing check is **kept as
+  the backstop**, per the same reasoning as every other schema-constrained field in this file
+  (recurring bit id, host name) — belt-and-braces against a future refactor or a non-`.parse()`
+  code path, not because the schema is expected to fail.
+- **General lesson, worth stating plainly since it's now paid off twice:** whenever a response
+  shape can be checked for validity by *construction* (a fixed enum, a fixed set of required
+  object keys) rather than only by inspecting the value afterward, prefer the structural fix. It
+  moves a whole class of model mistakes from "possible, then caught downstream" to "impossible to
+  express in the first place" — cheaper for the model to get right (there's no wrong shape to
+  accidentally produce) and cheaper for us to reason about (no code path where the bad shape
+  reaches validation and has to be rejected).
+
+**One-retry-with-feedback: the cheap resilience policy for outline/script/critique.** Structural
+schemas close off "wrong shape" mistakes, but they don't stop the model from producing a
+well-shaped response that still fails a check only inspectable after the fact — an outline citing
+a source_id that doesn't exist, a script segment citing an article it wasn't given, critique output
+that (hypothetically) breaks grounding. Before this, any such `ValueError` from `_validate_outline`/
+`validate_source_ids` crashed the stage outright, discarding an otherwise-almost-right response and
+forcing a full manual re-run. Added `podcast/llm_retry.py:generate_with_retry(generate, validate,
+user_prompt, stage_name)` — generic, shared by all three LLM-backed stages (not three copies of the
+same try/except): call `generate`, run `validate` (raises `ValueError` on a bad result), and on
+failure, retry **exactly once** with the error message appended to the prompt as corrective
+feedback; a second failure propagates unchanged, exactly as before this existed.
+- **Why exactly one retry, not N or exponential backoff.** This is a cheap, targeted fix for "the
+  model almost got it right" — telling it precisely what was wrong (the same `ValueError` message
+  a human debugging this would read) is usually enough to fix a source_id/coverage mistake in one
+  more try. A second failure is much more likely a deeper prompt/data problem that another retry
+  won't fix — better to surface it (crash/log, per the existing failure-handling policy) than mask
+  it behind silent retries that just burn more LLM cost for the same outcome.
+- **Only a `ValueError` from `validate()` triggers a retry** — not any exception `generate()` itself
+  raises (an OpenAI API error, a network blip). Those are a different failure class entirely (the
+  call itself didn't succeed, so there's no "response" to give feedback about) and should surface
+  immediately, not be retried with a nonsensical "your previous response was invalid" prompt.
+- **Wiring per stage**: `outline_stage`/`script_stage`/`critique_stage` each wrap their existing
+  `_generate_X` + validate call in two small closures (`generate(prompt)`, `validate(result)`)
+  capturing everything else (client, model, system_prompt, fixed context) so `generate_with_retry`
+  only ever needs to know about the one thing that changes on a retry: the user prompt.
+  `critique_stage`'s `validate` closure is the one wrinkle — grounding can only be checked on the
+  script the critique would *produce*, so it applies the critique first (`_apply_critique`, pure
+  and cheap) before validating, and `critique_stage` reapplies it once more after a validated
+  result comes back to build the real `revised_script`, rather than threading the applied script
+  back out of the generic retry helper.
+
+
+
+## Future work.
+- Add **suggest topics from previous episodes** from the previous podcasts. So it generatos a topic 
+(or a bunch of topics) for a podcast for you.

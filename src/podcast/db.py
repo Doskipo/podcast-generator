@@ -52,13 +52,19 @@ class EpisodeRecord(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     episode_id: str = Field(index=True, unique=True)  # matches data/episodes/<episode_id>/
     profile_id: int = Field(foreign_key="profiles.id")
-    status: str = Field(default="pending")  # pending | running | done | failed
+    status: str = Field(default="pending")  # pending | running | done | failed | no_content
     stage_reached: str | None = None  # fetch|rank|outline|script|critique|tts|stitch
     created_at: datetime
     duration_s: float | None = None
     total_characters: int | None = None
     cost_estimate_usd: float | None = None
     audio_path: str | None = None  # set once stitch succeeds
+    # Set only when status == "no_content": the profile.interests[].topic
+    # values that had zero fetched candidates this run — the grounding guard
+    # (podcast.service._check_grounding) refuses to build an episode from
+    # zero selected articles and stops the pipeline here instead. See
+    # docs/decisions.md ("Grounding guard").
+    no_content_interests: list[str] | None = Field(default=None, sa_column=Column(JSON))
 
 
 class EventRecord(SQLModel, table=True):
@@ -86,6 +92,23 @@ def init_db() -> None:
     every startup (CLI's main() and the API's lifespan both do)."""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     SQLModel.metadata.create_all(engine)
+    _migrate_add_missing_columns()
+
+
+def _migrate_add_missing_columns() -> None:
+    """SQLModel.metadata.create_all only creates missing TABLES, never alters
+    an existing one — a real data/podcast.db from before `no_content_interests`
+    existed would otherwise crash the first time this code reads/writes an
+    EpisodeRecord. Minimal, additive-only migration: add any column declared
+    on EpisodeRecord that the actual table doesn't have yet. No down-migration,
+    no rename/drop support, no other tables — this app has exactly one
+    additive column so far; reach for a real migration tool (Alembic) if that
+    changes."""
+    with engine.connect() as conn:
+        existing = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(episodes)").fetchall()}
+        if "no_content_interests" not in existing:
+            conn.exec_driver_sql("ALTER TABLE episodes ADD COLUMN no_content_interests JSON")
+            conn.commit()
 
 
 def get_session() -> Iterator[Session]:

@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from openai import OpenAI
 
 from podcast.env import require_env
+from podcast.llm_retry import generate_with_retry
 from podcast.models import (
     Article,
     Episode,
@@ -292,9 +293,13 @@ def script_stage(
 
     system_prompt, user_prompt = _build_prompts(profile, outline_output.outline, articles)
 
-    script = _generate_script(client, profile.llm.script_model, system_prompt, user_prompt)
+    def generate(prompt: str) -> Script:
+        return _generate_script(client, profile.llm.script_model, system_prompt, prompt)
 
-    validate_source_ids(script, known_ids)
+    def validate(script: Script) -> None:
+        validate_source_ids(script, known_ids)
+
+    script = generate_with_retry(generate, validate, user_prompt, stage_name="script")
 
     output = ScriptOutput(
         episode_id=episode.episode_id,

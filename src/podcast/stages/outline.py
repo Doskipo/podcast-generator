@@ -20,7 +20,20 @@ from openai import OpenAI
 from pydantic import BaseModel, create_model
 
 from podcast.env import require_env
-from podcast.models import Angle, Article, Episode, Host, Outline, OutlineOutput, OutlineStory, Profile, RankOutput, RecurringBit
+from podcast.llm_retry import generate_with_retry
+from podcast.models import (
+    Angle,
+    Article,
+    Episode,
+    Host,
+    HostStance,
+    Outline,
+    OutlineOutput,
+    OutlineStory,
+    Profile,
+    RankOutput,
+    RecurringBit,
+)
 from podcast.paths import episode_dir
 
 logger = logging.getLogger(__name__)
@@ -99,30 +112,38 @@ def _build_prompts(profile: Profile, articles: list[Article]) -> tuple[str, str]
 
 
 def _response_model(bit_ids: list[str], host_names: list[str]) -> type[BaseModel]:
-    """A structured-output schema shaped like Outline/OutlineStory, except
-    `recurring_bit` is constrained to a Literal enum of `bit_ids` (`None`-only
-    if there aren't any), and each stance's `host` is constrained to a
-    Literal enum of `host_names` — the model can't return an id/name that
-    doesn't exist, so a mismatched/paraphrased reference becomes a
-    schema-level impossibility, not just a prompt ask. _validate_outline
-    still re-checks both afterward as a backstop."""
+    """A structured-output schema shaped like Outline/OutlineStory, except:
+    - `recurring_bit` is constrained to a Literal enum of `bit_ids`
+      (`None`-only if there aren't any) — the model can't return an id that
+      doesn't exist.
+    - `stances` is not a list at all, but an object with one *required*
+      field per host name, each a {attitude, why, arc} stance — not
+      list[stance-with-a-host-field]. A list-of-discriminated-items schema
+      lets a model return two stances for one host and none for another
+      (seen in practice — see docs/decisions.md, "Structural schemas over
+      post-hoc validation"); an object with a fixed, required key per host
+      makes "exactly one stance per host" true by construction, the same
+      way a Literal enum makes an invalid bit id unrepresentable.
+    _validate_outline still re-checks both afterward as a backstop."""
     recurring_bit_type: type = (Literal[tuple(bit_ids)] | None) if bit_ids else type(None)
-    host_type: type = Literal[tuple(host_names)] if host_names else str
 
     stance_model = create_model(
-        "HostStanceResponse",
-        host=(host_type, ...),
+        "StanceResponse",
         attitude=(str, ...),
         why=(str, ...),
         arc=(str | None, None),
     )
+    # **{...} rather than literal kwargs: host names are runtime data, not
+    # known field names at code-writing time — create_model accepts any
+    # string key here even if it isn't a valid Python identifier.
+    stances_model = create_model("StancesResponse", **{name: (stance_model, ...) for name in host_names})
     story_model = create_model(
         "OutlineStoryResponse",
         headline=(str, ...),
         source_ids=(list[str], ...),
         angle=(Angle, ...),
         recurring_bit=(recurring_bit_type, None),
-        stances=(list[stance_model], ...),
+        stances=(stances_model, ...),
     )
     return create_model(
         "OutlineResponse",
@@ -131,14 +152,25 @@ def _response_model(bit_ids: list[str], host_names: list[str]) -> type[BaseModel
     )
 
 
+def _convert_story(story_response: BaseModel, host_names: list[str]) -> OutlineStory:
+    """One response story -> canonical OutlineStory. Every field but
+    `stances` round-trips via dump/revalidate (same shape); `stances` needs
+    its own conversion since the response has it as an object keyed by host
+    name (see _response_model), not the canonical list[HostStance]."""
+    stances_response = story_response.stances
+    stances = [
+        HostStance(host=name, **getattr(stances_response, name).model_dump()) for name in host_names
+    ]
+    data = story_response.model_dump(exclude={"stances"})
+    return OutlineStory.model_validate({**data, "stances": [s.model_dump() for s in stances]})
+
+
 def _generate_outline(
     client: OpenAI, model: str, system_prompt: str, user_prompt: str, bit_ids: list[str], host_names: list[str]
 ) -> Outline:
     """Boundary around the OpenAI call — the seam tests monkeypatch. Builds
     the bit_ids/host_names-constrained schema (see _response_model), then
-    converts the result back to the canonical Outline (same fields, just
-    recurring_bit's and stance.host's types differ) so the rest of the stage
-    doesn't need to know about it."""
+    converts the result back to the canonical Outline via _convert_story."""
     response_model = _response_model(bit_ids, host_names)
     completion = client.chat.completions.parse(
         model=model,
@@ -149,7 +181,8 @@ def _generate_outline(
         response_format=response_model,
     )
     parsed = completion.choices[0].message.parsed
-    return Outline.model_validate(parsed.model_dump())
+    stories = [_convert_story(story, host_names) for story in parsed.stories]
+    return Outline(title=parsed.title, stories=stories)
 
 
 def _validate_outline(
@@ -221,6 +254,16 @@ def _allocate_word_budgets(stories: list[OutlineStory], score_by_id: dict[str, f
 
 
 def outline_stage(episode: Episode, rank_output: RankOutput, client: OpenAI | None = None) -> OutlineOutput:
+    # Defensive backstop: podcast.service already stops the pipeline earlier
+    # (episode status "no_content") whenever rank selects zero articles, so
+    # this should never actually fire in the normal service-orchestrated
+    # flow — but outline_stage must refuse on its own too, for any direct/
+    # bypassed call, rather than ever let the script-writing step improvise
+    # an episode grounded in nothing. See docs/decisions.md ("Grounding
+    # guard").
+    if not rank_output.selected:
+        raise ValueError("outline_stage: rank_output.selected is empty — refusing to outline zero sources")
+
     if client is None:
         client = OpenAI(api_key=require_env("OPENAI_API_KEY"))
 
@@ -231,9 +274,14 @@ def outline_stage(episode: Episode, rank_output: RankOutput, client: OpenAI | No
     host_names = [host.name for host in profile.podcast.hosts]
 
     system_prompt, user_prompt = _build_prompts(profile, articles)
-    outline = _generate_outline(client, profile.llm.model, system_prompt, user_prompt, bit_ids, host_names)
 
-    _validate_outline(outline, known_ids, profile.podcast.recurring_bits, host_names)
+    def generate(prompt: str) -> Outline:
+        return _generate_outline(client, profile.llm.model, system_prompt, prompt, bit_ids, host_names)
+
+    def validate(outline: Outline) -> None:
+        _validate_outline(outline, known_ids, profile.podcast.recurring_bits, host_names)
+
+    outline = generate_with_retry(generate, validate, user_prompt, stage_name="outline")
 
     # word_budget is code-computed, not asked of the model — proportional to
     # each story's rank score, summing to duration_minutes*150 minus a

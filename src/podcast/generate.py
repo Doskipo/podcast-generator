@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -116,7 +117,51 @@ def run_from_critique(critique_path: str, until: str | None = None) -> str:
         return service.resume_from_critique(session, record, episode, critique_output, until)
 
 
+def serve() -> None:
+    """`uv run podcast serve` — start the FastAPI app (uvicorn), which serves
+    the built React UI (web/dist/, from `npm run build` — see docs/ui.md)
+    as static files alongside the API when present, API-only otherwise.
+    Builds nothing itself."""
+    import uvicorn
+
+    parser = argparse.ArgumentParser(prog="podcast serve", description="Serve the podcast-generator API (+ built UI)")
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--reload", action="store_true", help="restart on code changes (development only)")
+    args = parser.parse_args(sys.argv[2:])
+
+    uvicorn.run("podcast.api.app:app", host=args.host, port=args.port, reload=args.reload)
+
+
+def import_profile() -> None:
+    """`uv run podcast import-profile <path>` — load a profile YAML and
+    overwrite the DB's profiles row (id=1) with it, regardless of what's
+    already there. Unlike the API's own startup seeding (which only fills
+    an empty table — see api/app.py, service.seed_profile_from_yaml_if_empty),
+    this is an explicit overwrite: the intended way to push a hand-edited
+    profile file into a DB that already has one."""
+    parser = argparse.ArgumentParser(
+        prog="podcast import-profile", description="Import a profile YAML into the DB, overwriting any existing profile"
+    )
+    parser.add_argument("path", help="path to a profile yaml file")
+    args = parser.parse_args(sys.argv[2:])
+
+    load_dotenv()
+    db.init_db()
+    with db.session_scope() as session:
+        row = service.import_profile_overwrite(session, args.path)
+    print(f"imported profile {row.name!r} from {args.path} into the DB")
+
+
 def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == "serve":
+        serve()
+        return
+
+    if len(sys.argv) > 1 and sys.argv[1] == "import-profile":
+        import_profile()
+        return
+
     load_dotenv()
     logging.basicConfig(level=logging.INFO)
     db.init_db()

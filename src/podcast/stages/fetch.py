@@ -24,6 +24,7 @@ from podcast.models import (
     DEFAULT_CURATED_WINDOW_HOURS,
     Article,
     FetchOutput,
+    InterestSuggestion,
     Profile,
     QueryList,
 )
@@ -129,6 +130,59 @@ def ensure_interest_queries(profile: Profile, profile_path: str | Path, client: 
 
     profile.to_yaml(profile_path)
     return True
+
+
+def _generate_suggestion(client: OpenAI, model: str, topic: str, description: str | None) -> InterestSuggestion:
+    """Boundary around the OpenAI call — the seam tests monkeypatch. Same
+    call shape as _generate_queries, extended to also draft a one-line
+    description — one call gets both, at no extra cost over queries alone."""
+    today = datetime.now(timezone.utc).date().isoformat()
+    user_content = f"Today's date: {today}\nTopic: {topic}\n"
+    if description:
+        user_content += f"User's own rough description (refine, don't ignore): {description}\n"
+    user_content += f"Give a one-line description and exactly {NUM_GENERATED_QUERIES} short search queries."
+
+    completion = client.chat.completions.parse(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You help a user define one topic of interest for a personalized news "
+                    "podcast. Given a topic (and optionally the user's own rough description), "
+                    "produce two things: "
+                    "(1) description: a precise one-line description of what this interest "
+                    "actually means — its scope and angle, so relevance can be judged against "
+                    "it later. Example, for the topic 'interpretability': 'mechanistic "
+                    "interpretability of neural networks: circuits, features, probes, sparse "
+                    "autoencoders'. "
+                    "(2) queries: short, event-shaped news-search queries — phrases likely to "
+                    "surface actual recent news or events, not generic explainers. Example for "
+                    "'calisthenics': 'calisthenics competition', 'calisthenics world record', "
+                    "'street workout news'. Never hardcode a specific year (you don't reliably "
+                    "know the current one) — write queries that work regardless of when they're "
+                    "run."
+                ),
+            },
+            {"role": "user", "content": user_content},
+        ],
+        response_format=InterestSuggestion,
+    )
+    parsed = completion.choices[0].message.parsed
+    return InterestSuggestion(description=parsed.description, queries=parsed.queries[:NUM_GENERATED_QUERIES])
+
+
+def suggest_interest(
+    topic: str, description: str | None, model: str, client: OpenAI | None = None
+) -> InterestSuggestion:
+    """One LLM call: a one-line description draft (the user can accept or
+    edit) plus event-shaped search queries — backs the settings UI's
+    "suggest" button (POST /interests/suggest). User-triggered and opt-in;
+    not wired into ensure_interest_queries, which only ever fills `queries`
+    automatically at profile-load time."""
+    if client is None:
+        client = OpenAI(api_key=require_env("OPENAI_API_KEY"))
+    return _generate_suggestion(client, model, topic, description)
 
 
 # Query params stripped before dedup — known tracking noise only. Everything

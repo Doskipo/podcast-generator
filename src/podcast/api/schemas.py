@@ -23,12 +23,17 @@ class EpisodeCreateResponse(BaseModel):
 
 class EpisodeSummary(BaseModel):
     episode_id: str
-    status: str
+    status: str  # pending | running | done | failed | no_content
     stage_reached: str | None
     created_at: datetime
     duration_s: float | None
     total_characters: int | None
     cost_estimate_usd: float | None
+    # Set only when status == "no_content": the interests that had zero
+    # fetched candidates this run. On the list itself (not just detail) so
+    # the Episodes UI can show it without an extra fetch. See
+    # docs/decisions.md ("Grounding guard").
+    no_content_interests: list[str] | None = None
 
 
 class ShowNoteItem(BaseModel):

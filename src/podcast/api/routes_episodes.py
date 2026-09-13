@@ -39,6 +39,7 @@ def _to_summary(record: db.EpisodeRecord) -> EpisodeSummary:
         duration_s=record.duration_s,
         total_characters=record.total_characters,
         cost_estimate_usd=record.cost_estimate_usd,
+        no_content_interests=record.no_content_interests,
     )
 
 

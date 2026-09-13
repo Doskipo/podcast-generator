@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, model_validator
 
 
 def _slugify(text: str) -> str:
@@ -115,6 +115,24 @@ class PodcastSettings(BaseModel):
     recurring_bits: list[RecurringBit] = Field(default_factory=list)
     style: Style
     tone: str
+
+    @model_validator(mode="after")
+    def _validate_hosts(self) -> "PodcastSettings":
+        # The pipeline's own design assumes exactly two hosts (script.py
+        # assigns roles positionally: hosts[0] drives, hosts[1] asks — see
+        # docs/decisions.md, "Script stage"), and tts_stage raises on any
+        # script line whose speaker has no matching host/voice — so this is
+        # enforced here, once, rather than as a hopeful runtime assumption.
+        # Enforced on every Profile validation (PUT /profile, profile
+        # YAML loads, DB seeding), so a bad profile is rejected at the
+        # boundary (422 for the API) instead of failing deep in the
+        # pipeline. See docs/decisions.md ("Profile validation").
+        if len(self.hosts) != 2:
+            raise ValueError(f"exactly two hosts are required, got {len(self.hosts)}")
+        for host in self.hosts:
+            if not host.voice_id or not host.voice_id.strip():
+                raise ValueError(f"host {host.name!r} must have a non-empty voice_id")
+        return self
 
 
 class FetchSettings(BaseModel):
@@ -229,6 +247,17 @@ class QueryList(BaseModel):
     """Structured-output shape for the cheap LLM call that turns an interest's
     topic into event-shaped search queries (see fetch.py:_generate_queries)."""
 
+    queries: list[str]
+
+
+class InterestSuggestion(BaseModel):
+    """Structured-output shape for the combined description+queries call
+    behind the settings UI's "suggest" button (see
+    fetch.py:suggest_interest, api/routes_interests.py). One LLM call draws
+    both a one-line description draft and NUM_GENERATED_QUERIES event-shaped
+    search queries — same cost as generating queries alone."""
+
+    description: str  # one line, e.g. "mechanistic interpretability of neural networks: circuits, features, probes"
     queries: list[str]
 
 

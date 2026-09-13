@@ -320,3 +320,38 @@ def test_ensure_interest_queries_skips_when_nothing_to_generate(tmp_path, monkey
 
     assert changed is False
     assert not profile_path.exists()  # nothing changed, so nothing was written
+
+
+def test_suggest_interest_returns_description_and_queries(monkeypatch):
+    from podcast.models import InterestSuggestion
+
+    captured = {}
+
+    def fake_generate(client, model, topic, description):
+        captured["topic"] = topic
+        captured["description"] = description
+        captured["model"] = model
+        return InterestSuggestion(description="a precise one-liner", queries=["q1", "q2", "q3"])
+
+    monkeypatch.setattr(fetch_module, "_generate_suggestion", fake_generate)
+
+    result = fetch_module.suggest_interest("calisthenics", "sport stuff", "gpt-4o-mini", client=object())
+
+    assert result.description == "a precise one-liner"
+    assert result.queries == ["q1", "q2", "q3"]
+    assert captured == {"topic": "calisthenics", "description": "sport stuff", "model": "gpt-4o-mini"}
+
+
+def test_suggest_interest_constructs_client_when_none_given(monkeypatch):
+    from podcast.models import InterestSuggestion
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(
+        fetch_module,
+        "_generate_suggestion",
+        lambda client, model, topic, description: InterestSuggestion(description="d", queries=["a"]),
+    )
+
+    result = fetch_module.suggest_interest("topic", None, "gpt-4o-mini")
+
+    assert result.description == "d"

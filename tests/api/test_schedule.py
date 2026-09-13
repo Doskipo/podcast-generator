@@ -35,6 +35,10 @@ def _configure_test_db(monkeypatch, tmp_path: Path) -> None:
     test_engine = create_engine(f"sqlite:///{tmp_path / 't.db'}", connect_args={"check_same_thread": False})
     SQLModel.metadata.create_all(test_engine)
     monkeypatch.setattr(db, "engine", test_engine)
+    # Prevent the app's startup seeding (service.seed_profile_from_yaml_if_empty)
+    # from picking up the real profiles/eudald.yaml — these tests want a
+    # genuinely empty profiles table unless they seed one themselves.
+    monkeypatch.setenv("PODCAST_PROFILE_PATH", str(tmp_path / "no-such-profile.yaml"))
 
 
 def _patch_episode_dir(monkeypatch, tmp_path: Path) -> None:

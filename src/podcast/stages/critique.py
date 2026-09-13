@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from openai import OpenAI
 
 from podcast.env import require_env
+from podcast.llm_retry import generate_with_retry
 from podcast.models import (
     Article,
     Critique,
@@ -273,12 +274,19 @@ def critique_stage(
     outline = outline_output.outline
 
     system_prompt, user_prompt = _build_prompts(profile, original_script, outline)
-    critique = _generate_critique(client, model, system_prompt, user_prompt)
-
-    revised_script = _apply_critique(original_script, critique)
-
     known_ids = {a.source_id for a in articles}
-    validate_source_ids(revised_script, known_ids)
+
+    def generate(prompt: str) -> Critique:
+        return _generate_critique(client, model, system_prompt, prompt)
+
+    def validate(critique: Critique) -> None:
+        # Grounding can only be re-checked on the script the critique would
+        # actually produce, so validation here applies it first (pure,
+        # deterministic, cheap to redo below with the validated critique).
+        validate_source_ids(_apply_critique(original_script, critique), known_ids)
+
+    critique = generate_with_retry(generate, validate, user_prompt, stage_name="critique")
+    revised_script = _apply_critique(original_script, critique)
 
     total_words = sum(len(line.text.split()) for line in flatten_lines(revised_script))
     over_budget_segments = _budget_flags(outline, revised_script)

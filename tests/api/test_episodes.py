@@ -54,6 +54,10 @@ def _configure_test_db(monkeypatch, tmp_path: Path) -> None:
     test_engine = create_engine(f"sqlite:///{tmp_path / 't.db'}", connect_args={"check_same_thread": False})
     SQLModel.metadata.create_all(test_engine)
     monkeypatch.setattr(db, "engine", test_engine)
+    # Prevent the app's startup seeding (service.seed_profile_from_yaml_if_empty)
+    # from picking up the real profiles/eudald.yaml — these tests want a
+    # genuinely empty profiles table unless they seed one themselves.
+    monkeypatch.setenv("PODCAST_PROFILE_PATH", str(tmp_path / "no-such-profile.yaml"))
 
 
 def _patch_episode_dir(monkeypatch, tmp_path: Path) -> None:
@@ -249,3 +253,45 @@ def test_post_episode_event_unknown_episode_is_404(tmp_path, monkeypatch):
     with TestClient(app) as client:
         resp = client.post("/episodes/does-not-exist/events", json={"type": "played"})
     assert resp.status_code == 404
+
+
+def _fake_run_episode_no_content(profile, profile_id, episode_id=None, until=None) -> str:
+    """Stands in for service.run_episode hitting the grounding guard: rank
+    selected zero articles, so the (fake) pipeline stops there — same shape
+    as service._check_grounding actually leaves the DB in."""
+    with db.session_scope() as session:
+        record = service.get_or_create_episode_record(session, episode_id, profile_id)
+        record.status = "no_content"
+        record.no_content_interests = ["testing"]
+        session.add(record)
+        session.commit()
+    return episode_id
+
+
+def test_no_content_episode_is_a_non_error_state_with_the_empty_interests_listed(tmp_path, monkeypatch):
+    _configure_test_db(monkeypatch, tmp_path)
+    _patch_episode_dir(monkeypatch, tmp_path)
+    monkeypatch.setattr(service, "run_episode", _fake_run_episode_no_content)
+
+    with TestClient(app) as client:
+        _seed_profile(client)
+        episode_id = client.post("/episodes", json={}).json()["episode_id"]
+
+        list_resp = client.get("/episodes")
+        detail_resp = client.get(f"/episodes/{episode_id}")
+
+    episode_summary = next(e for e in list_resp.json() if e["episode_id"] == episode_id)
+    assert episode_summary["status"] == "no_content"
+    assert episode_summary["no_content_interests"] == ["testing"]
+
+    # Detail still resolves cleanly (no script/audio yet, not an error).
+    assert detail_resp.status_code == 200
+    detail = detail_resp.json()
+    assert detail["status"] == "no_content"
+    assert detail["no_content_interests"] == ["testing"]
+    assert detail["script"] is None
+
+    # No audio to serve for a no_content episode — 404, not a crash.
+    with TestClient(app) as client:
+        audio_resp = client.get(f"/episodes/{episode_id}/audio")
+    assert audio_resp.status_code == 404
