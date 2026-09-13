@@ -21,6 +21,7 @@ output an mp3. Later: FastAPI backend, scheduler, settings UI, metrics dashboard
 - Small, reviewable diffs. One stage per task.
 - Explain non-obvious trade-offs in one or two lines in `docs/decisions.md`.
 - Tests: a smoke test per stage with a fixture, no network in tests.
+- Never delete files or directories outside /tmp or paths you created this session; ask first. data/ is never deleted.
 
 ## Commands
 - `uv run python -m podcast.generate --profile profiles/eudald.yaml`

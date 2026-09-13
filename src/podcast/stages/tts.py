@@ -21,6 +21,7 @@ take effect in the per-line fallback).
 from __future__ import annotations
 
 import base64
+import hashlib
 import logging
 import re
 from datetime import datetime, timezone
@@ -62,6 +63,18 @@ def _tagged_text(line: Line) -> str:
     if line.text.lstrip().startswith("["):
         return line.text
     return f"[{line.delivery}] {line.text}"
+
+
+def _content_key(text: str) -> str:
+    """Short hash of the exact text sent to synthesis. Filenames include this
+    so the skip-if-exists resume check is content-addressed, not just
+    index+speaker — otherwise regenerating the outline/script (a fresh LLM
+    call, different content but often the same index->speaker shape) can
+    silently reuse a *different* run's leftover audio for that slot. Caught
+    in practice: an episode dir accumulated segments/ files across several
+    script regenerations, and most of a later run's "lines" turned out to
+    still be stale audio from an earlier one — see docs/decisions.md."""
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:8]
 
 
 def _chunk_lines(lines: list[Line], char_limit: int) -> list[list[Line]]:
@@ -215,7 +228,13 @@ def tts_stage(episode: Episode, script_output: ScriptOutput, client: ElevenLabs 
 
     segments_dir = episode_dir(episode.episode_id) / "segments"
     segments_dir.mkdir(parents=True, exist_ok=True)
-    filenames = [f"{i:03d}_{_sanitize_speaker(line.speaker)}.mp3" for i, line in enumerate(lines)]
+    # content-addressed: index + speaker + a hash of the exact synthesized
+    # text, so a stale file from a different script generation can never be
+    # mistaken for this run's line at the same position (see _content_key).
+    filenames = [
+        f"{i:03d}_{_sanitize_speaker(line.speaker)}_{_content_key(_tagged_text(line))}.mp3"
+        for i, line in enumerate(lines)
+    ]
 
     dialogue_ok = _synthesize_dialogue(
         client, profile.podcast.hosts, profile.tts.dialogue_model_id, lines, filenames, segments_dir

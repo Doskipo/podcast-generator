@@ -20,7 +20,7 @@ from openai import OpenAI
 from pydantic import BaseModel, create_model
 
 from podcast.env import require_env
-from podcast.models import Angle, Article, Episode, Host, Outline, OutlineOutput, Profile, RankOutput, RecurringBit
+from podcast.models import Angle, Article, Episode, Host, Outline, OutlineOutput, OutlineStory, Profile, RankOutput, RecurringBit
 from podcast.paths import episode_dir
 
 logger = logging.getLogger(__name__)
@@ -60,6 +60,8 @@ def _build_prompts(profile: Profile, articles: list[Article]) -> tuple[str, str]
         or "(none configured)"
     )
 
+    host_names = ", ".join(f'"{host.name}"' for host in podcast.hosts)
+
     system_prompt = (
         "You are the showrunner for a two-host podcast, planning the episode before any "
         "dialogue is written.\n\n"
@@ -74,6 +76,12 @@ def _build_prompts(profile: Profile, articles: list[Article]) -> tuple[str, str]
         "above (currently just their name, unless more is listed) — never invent "
         "hobbies, opinions, or biography for them; if nothing concrete fits, ground the "
         "tangent in a host's own backstory instead, or leave tangent null.\n"
+        "For each story, also give each host a stance: an attitude toward that specific "
+        "story (e.g. excited, skeptical, moved, amused, bored, annoyed, protective — or "
+        "another word that actually fits), one sentence on why, consistent with that "
+        "host's persona and home turf above, and an arc — how the stance shifts by the "
+        "end of the segment, if it does at all (null if it stays constant throughout). "
+        f"Every story needs exactly one stance per host: {host_names}.\n"
         "If a recurring bit genuinely fits a story, set recurring_bit to its id exactly "
         "as listed above (the response schema only accepts those ids, or null) — never "
         "exceed a bit's stated max uses per episode, and leave it null if nothing fits. "
@@ -90,21 +98,31 @@ def _build_prompts(profile: Profile, articles: list[Article]) -> tuple[str, str]
     return system_prompt, user_prompt
 
 
-def _response_model(bit_ids: list[str]) -> type[BaseModel]:
+def _response_model(bit_ids: list[str], host_names: list[str]) -> type[BaseModel]:
     """A structured-output schema shaped like Outline/OutlineStory, except
     `recurring_bit` is constrained to a Literal enum of `bit_ids` (`None`-only
-    if there aren't any) instead of a free string — the model can't return an
-    id that doesn't exist, so a mismatched/paraphrased bit reference (the bug
-    this fixes) becomes a schema-level impossibility, not just a prompt ask.
-    _validate_outline still re-checks it afterward as a backstop."""
+    if there aren't any), and each stance's `host` is constrained to a
+    Literal enum of `host_names` — the model can't return an id/name that
+    doesn't exist, so a mismatched/paraphrased reference becomes a
+    schema-level impossibility, not just a prompt ask. _validate_outline
+    still re-checks both afterward as a backstop."""
     recurring_bit_type: type = (Literal[tuple(bit_ids)] | None) if bit_ids else type(None)
+    host_type: type = Literal[tuple(host_names)] if host_names else str
 
+    stance_model = create_model(
+        "HostStanceResponse",
+        host=(host_type, ...),
+        attitude=(str, ...),
+        why=(str, ...),
+        arc=(str | None, None),
+    )
     story_model = create_model(
         "OutlineStoryResponse",
         headline=(str, ...),
         source_ids=(list[str], ...),
         angle=(Angle, ...),
         recurring_bit=(recurring_bit_type, None),
+        stances=(list[stance_model], ...),
     )
     return create_model(
         "OutlineResponse",
@@ -114,13 +132,14 @@ def _response_model(bit_ids: list[str]) -> type[BaseModel]:
 
 
 def _generate_outline(
-    client: OpenAI, model: str, system_prompt: str, user_prompt: str, bit_ids: list[str]
+    client: OpenAI, model: str, system_prompt: str, user_prompt: str, bit_ids: list[str], host_names: list[str]
 ) -> Outline:
     """Boundary around the OpenAI call — the seam tests monkeypatch. Builds
-    the bit_ids-constrained schema (see _response_model), then converts the
-    result back to the canonical Outline (same fields, just recurring_bit's
-    type differs) so the rest of the stage doesn't need to know about it."""
-    response_model = _response_model(bit_ids)
+    the bit_ids/host_names-constrained schema (see _response_model), then
+    converts the result back to the canonical Outline (same fields, just
+    recurring_bit's and stance.host's types differ) so the rest of the stage
+    doesn't need to know about it."""
+    response_model = _response_model(bit_ids, host_names)
     completion = client.chat.completions.parse(
         model=model,
         messages=[
@@ -133,9 +152,12 @@ def _generate_outline(
     return Outline.model_validate(parsed.model_dump())
 
 
-def _validate_outline(outline: Outline, known_ids: set[str], recurring_bits: list[RecurringBit]) -> None:
+def _validate_outline(
+    outline: Outline, known_ids: set[str], recurring_bits: list[RecurringBit], host_names: list[str]
+) -> None:
     known_bit_ids = {bit.effective_id for bit in recurring_bits}
     max_per_bit = {bit.effective_id: bit.max_per_episode for bit in recurring_bits}
+    known_host_names = set(host_names)
 
     used_ids: set[str] = set()
     bit_counts: dict[str, int] = {}
@@ -150,6 +172,13 @@ def _validate_outline(outline: Outline, known_ids: set[str], recurring_bits: lis
                     f"story {story.headline!r} has both recurring_bit {story.recurring_bit!r} and a "
                     "tangent — a segment may not carry both"
                 )
+
+        stance_hosts = [stance.host for stance in story.stances]
+        if set(stance_hosts) != known_host_names or len(stance_hosts) != len(known_host_names):
+            raise ValueError(
+                f"story {story.headline!r} must have exactly one stance per host {sorted(known_host_names)}, "
+                f"got {stance_hosts}"
+            )
 
     unknown = used_ids - known_ids
     if unknown:
@@ -199,11 +228,12 @@ def outline_stage(episode: Episode, rank_output: RankOutput, client: OpenAI | No
     articles = rank_output.selected
     known_ids = {a.source_id for a in articles}
     bit_ids = [bit.effective_id for bit in profile.podcast.recurring_bits]
+    host_names = [host.name for host in profile.podcast.hosts]
 
     system_prompt, user_prompt = _build_prompts(profile, articles)
-    outline = _generate_outline(client, profile.llm.model, system_prompt, user_prompt, bit_ids)
+    outline = _generate_outline(client, profile.llm.model, system_prompt, user_prompt, bit_ids, host_names)
 
-    _validate_outline(outline, known_ids, profile.podcast.recurring_bits)
+    _validate_outline(outline, known_ids, profile.podcast.recurring_bits, host_names)
 
     # word_budget is code-computed, not asked of the model — proportional to
     # each story's rank score, summing to duration_minutes*150 minus a

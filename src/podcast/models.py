@@ -154,6 +154,12 @@ class Profile(BaseModel):
     fetch: FetchSettings = Field(default_factory=FetchSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
     tts: TTSSettings = Field(default_factory=TTSSettings)
+    # Cron expression (min hour dom month dow) for the scheduler to create an
+    # episode on. Default: daily at 07:00 UTC. Parsed/validated by
+    # apscheduler.triggers.cron.CronTrigger.from_crontab at schedule-registration
+    # time (podcast/scheduler.py) — not validated here, to avoid a second,
+    # possibly-diverging cron parser in the codebase.
+    schedule: str = "0 7 * * *"
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> Profile:
@@ -284,6 +290,19 @@ class Angle(BaseModel):
     tangent: str | None = None
 
 
+class HostStance(BaseModel):
+    """One host's emotional posture toward a story — what the script step
+    should write that host's lines from. `host` must match a
+    profile.podcast.hosts[] name exactly (outline.py's response schema
+    constrains it to a Literal enum of known names, the same technique used
+    for RecurringBit ids)."""
+
+    host: str
+    attitude: str  # e.g. "excited", "skeptical", "moved", "amused", "bored", "annoyed", "protective" — free text, not an enum
+    why: str  # one sentence, consistent with the host's persona/home_turf
+    arc: str | None = None  # how the stance shifts by the end of the segment; None = stays constant throughout
+
+
 class OutlineStory(BaseModel):
     headline: str
     source_ids: list[str]  # subset of the ranked articles' source_ids this story is grounded in
@@ -295,6 +314,7 @@ class OutlineStory(BaseModel):
     # story's rank score. Computed in code by outline_stage after the LLM
     # call (not asked of the model) — defaults to 0 until then.
     word_budget: int = 0
+    stances: list[HostStance]  # one per host in profile.podcast.hosts — validated in outline.py
 
 
 class Outline(BaseModel):
@@ -365,7 +385,7 @@ class CritiqueFlag(BaseModel):
 
     line_index: int
     # e.g. "robotic", "expository", "breaks_persona", "invented_listener_detail",
-    # "too_long", "the_article_phrasing", "repeated_correct"
+    # "too_long", "the_article_phrasing", "repeated_correct", "written_not_spoken"
     issue: str
     rewritten_lines: list[Line]
 
@@ -387,6 +407,18 @@ class SegmentBudgetFlag(BaseModel):
     over_by_percent: float
 
 
+class HostBrevityFlag(BaseModel):
+    """A host whose lines are more than TERSE_HOST_THRESHOLD (60%) under
+    SHORT_LINE_WORDS (8) words — computed in code (line-length is countable,
+    no LLM judgment needed), not part of the LLM-facing Critique schema.
+    Informational: flags a distribution problem across all of that host's
+    lines, not any one line to rewrite."""
+
+    host: str
+    short_line_fraction: float  # fraction of this host's lines under SHORT_LINE_WORDS words
+    line_count: int  # total lines from this host, for context
+
+
 class CritiqueOutput(BaseModel):
     """Typed output of the critique stage, persisted as critique.json. Keeps
     both the pre-critique and rewritten script — critique.py only replaces
@@ -401,6 +433,7 @@ class CritiqueOutput(BaseModel):
     revised_script: Script
     total_words: int  # word count of revised_script (cold_open + segments + outro)
     over_budget_segments: list[SegmentBudgetFlag]
+    terse_hosts: list[HostBrevityFlag]
 
 
 class TTSLine(BaseModel):

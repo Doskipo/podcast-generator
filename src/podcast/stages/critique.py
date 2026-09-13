@@ -27,6 +27,7 @@ from podcast.models import (
     Critique,
     CritiqueOutput,
     Episode,
+    HostBrevityFlag,
     Line,
     Outline,
     OutlineOutput,
@@ -36,20 +37,20 @@ from podcast.models import (
     SegmentBudgetFlag,
 )
 from podcast.paths import episode_dir
-from podcast.stages.script import flatten_lines, validate_source_ids
+from podcast.stages.script import MAX_LINE_WORDS, flatten_lines, validate_source_ids
 
 logger = logging.getLogger(__name__)
-
-# No line should run over this many words, except inside the segment
-# carrying the recurring bit — matches the same rule stated to the writing
-# step (script.py); this is the code-side detector that feeds the critique
-# prompt specific line indices to split, since "does this read naturally
-# split in two" needs the model, but "is this line too long" doesn't.
-MAX_LINE_WORDS = 35
 
 # A segment counts as over budget once it exceeds its outline word_budget by
 # more than this fraction.
 BUDGET_OVERRUN_THRESHOLD = 0.20
+
+# A line at or under this many words counts as "short" for the per-host
+# brevity check below.
+SHORT_LINE_WORDS = 8
+
+# A host is flagged once more than this fraction of their lines are short.
+TERSE_HOST_THRESHOLD = 0.60
 
 
 def _render_script(script: Script) -> str:
@@ -142,6 +143,9 @@ def _build_prompts(profile: Profile, script: Script, outline: Outline) -> tuple[
         "opinion, preference, biography) that isn't in the Listener line above\n"
         "- the_article_phrasing: says 'the article' or 'the paper' instead of naming the "
         "actual actor (researcher/company/organization) or calling it 'the report'\n"
+        "- written_not_spoken: reads like prose on a page — no natural connectors or "
+        "disfluencies ('I mean', 'no?', 'okay so', 'look', 'wait'), no self-corrections, "
+        "no mid-line tone shift, too clean and complete to be something a person just said\n"
         "- too_long: see below\n"
         "- repeated_correct: see below\n\n"
         f"{over_length_line}"
@@ -211,6 +215,24 @@ def _segment_word_count(lines: list[Line]) -> int:
     return sum(len(line.text.split()) for line in lines)
 
 
+def _host_brevity_flags(script: Script) -> list[HostBrevityFlag]:
+    """Hosts whose lines are more than TERSE_HOST_THRESHOLD (60%) under
+    SHORT_LINE_WORDS (8) words — computed in code (no LLM judgment needed),
+    across every line in the script, not just one segment. Informational:
+    flags a distribution problem, doesn't rewrite anything itself."""
+    lines_by_host: dict[str, list[Line]] = {}
+    for line in flatten_lines(script):
+        lines_by_host.setdefault(line.speaker, []).append(line)
+
+    flags: list[HostBrevityFlag] = []
+    for host, lines in lines_by_host.items():
+        short_count = sum(1 for line in lines if len(line.text.split()) <= SHORT_LINE_WORDS)
+        fraction = short_count / len(lines)
+        if fraction > TERSE_HOST_THRESHOLD:
+            flags.append(HostBrevityFlag(host=host, short_line_fraction=round(fraction, 2), line_count=len(lines)))
+    return flags
+
+
 def _budget_flags(outline: Outline, script: Script) -> list[SegmentBudgetFlag]:
     """Segments (by position, matching outline.stories to script.segments)
     whose word count exceeds their outline word_budget by more than
@@ -260,6 +282,7 @@ def critique_stage(
 
     total_words = sum(len(line.text.split()) for line in flatten_lines(revised_script))
     over_budget_segments = _budget_flags(outline, revised_script)
+    terse_hosts = _host_brevity_flags(revised_script)
 
     output = CritiqueOutput(
         episode_id=episode.episode_id,
@@ -270,6 +293,7 @@ def critique_stage(
         revised_script=revised_script,
         total_words=total_words,
         over_budget_segments=over_budget_segments,
+        terse_hosts=terse_hosts,
     )
 
     out_path = episode_dir(episode.episode_id) / "critique.json"

@@ -772,3 +772,150 @@ willing to invent, too free with the recurring bit and tangents crowding every s
   lines, 1087 words, 6,877 characters** for one real 8-minute episode — `generate.py`'s tts
   summary line now prints `synthesis_mode` and `total_characters` (`TTSOutput.total_characters`)
   every run, so this is visible per-episode going forward, not just this one measurement.
+
+## Humanisation pass — 2026-09-13
+One iteration: outline gives each host an emotional stance and arc per story, the script leans
+into spoken texture and dense emotion tags, and the line-length cap relaxes with a per-host
+brevity check. Also found and fixed a real bug in the course of re-running this end to end.
+
+- **(1) Stance + arc, schema-constrained the same way as recurring bits.** New `HostStance`
+  (`host`, `attitude`, `why`, `arc`) on `OutlineStory.stances` — one per host, required. Reused
+  the exact `Literal`-via-`create_model` technique from the recurring-bit id fix: `_response_model`
+  now also takes `host_names` and constrains each stance's `host` to a `Literal` enum of the
+  profile's actual host names, so a stance can't reference a host that doesn't exist (verified:
+  `model_validate` rejects `"Carol"` when only Nova/Max are configured). `_validate_outline` still
+  backstops it — every story needs exactly one stance per known host, no fewer, no more, no
+  duplicates. `script.py`'s hard rules now say to write every line from that host's *current*
+  stance for the story, and — if the stance has an arc — to let the shift actually show across
+  the segment's dialogue rather than just asserting the ending feeling on the last line.
+- **(2) Spoken texture + `written_not_spoken`.** Prompt-only, like the em-dash/interjection rules
+  from the script quality pass: connectors and disfluencies at a natural rate ("I mean", "no?",
+  "okay so", "look", "wait"), occasional self-correction/restarts, ellipsis-or-colon for a mid-line
+  tone shift, CAPS for vocal emphasis, "read like something said, not written." No code check is
+  possible here (same reasoning as the em-dash/interjection rules already in place — this is a
+  style judgment, not a countable property), so the backstop is a new critique criterion,
+  `written_not_spoken`, added alongside the existing LLM-judged ones.
+- **(3) Tag density, verified against real output.** Prompt asks for at least one audio tag every
+  two or three lines, and — the more specific ask — tags "where the emotion shifts, not only at
+  line starts": `delivery` still places one tag at a line's start, but the prompt now tells the
+  writer to embed a tag directly in the line's own text when the shift happens mid-line instead,
+  leaving `delivery` null for that line. No architecture change needed for this — whatever's in
+  `line.text` already reaches ElevenLabs verbatim, `delivery` was always just a start-of-line
+  convenience on top of that. Re-ran the real episode's outline→script→critique to check: **55
+  tags across 58 lines (≈1 tag per 1.1 lines)** — denser than the "every two or three lines" ask,
+  not under it — drawn from a real vocabulary spread (`[excited]` ×10, `[deadpan]` ×8, `[laughs]`
+  ×7, `[amused]` ×5, plus 17 more distinct tags used once or twice each — `[warmly]`, `[curious]`,
+  `[dry]`, `[firm]`, `[skeptical]`, `[teasing]`, ...). Not visibly clustered at line-starts only,
+  spot-checked several lines with an inline tag mid-sentence.
+- **(4) Line cap relaxed to 45, host brevity flag.** `MAX_LINE_WORDS` moved from `critique.py` to
+  `script.py` (35 → 45) — it's a writing-time rule first, critique backstop second, so it now
+  lives where it's authored and `critique.py` imports it, instead of two files each hardcoding the
+  number and risking drift. Real output check: the one line over 45 words (63 words, Alice) fell
+  inside the recurring-bit segment — exactly the carve-out the rule allows, not a violation (it's
+  the bit's own "20-30 second escalating scenario" per the bit's description). New
+  `HostBrevityFlag`/`critique.py:_host_brevity_flags` — same code-detected, LLM-facing-schema-free
+  pattern as `SegmentBudgetFlag`: for each host, the fraction of their lines at or under 8 words;
+  flagged past 60%. Deliberately generic (no host hardcoded) even though the ask specifically named
+  Bob as the "economical" persona in this profile — the rule and the check apply to whichever host
+  a profile's persona makes terse, not a fixed name. Real check: Alice 20% short lines, Bob 29% —
+  both comfortably under the 60% flag threshold, and Bob's own longer lines (up to the low 40s)
+  confirm "economical on average" rather than "short on every line" came through.
+- **Bug found and fixed while re-running this end to end: segment filenames weren't
+  content-addressed, so a script regeneration could silently reuse a *different* script's audio.**
+  `tts_stage`'s per-line filenames were `{index}_{speaker}.mp3` — stable across runs whenever the
+  index→speaker shape happened to match (common, since cold-open-then-alternating-hosts is a
+  stable pattern across independent regenerations). Re-running outline→script→critique against
+  the same episode dir during this pass produced a new 58-line script, but the "re-run through
+  stitch" request's first attempt silently reused 56 of those 58 lines' audio from an *earlier,
+  different* script version already sitting in `segments/` from prior testing — confirmed by file
+  mtimes (hours earlier than the run that supposedly produced them) and by two dialogue-mode
+  chunks logging "already synthesized, skipping" when nothing in *this* run should have existed
+  yet. The resulting `episode.mp3` didn't actually match the script being reported on. Fixed by
+  making filenames content-addressed: `{index}_{speaker}_{sha1(tagged_text)[:8]}.mp3`
+  (`tts.py:_content_key`) — a line whose text changes between runs gets a different filename, so a
+  stale file simply can't be found and gets resynthesized, while an unchanged line across a
+  same-script re-run (the actual point of skip-if-exists: cheap recovery from a partial failure)
+  still matches and is still skipped. Cleaned the affected episode's `segments/` and re-ran
+  tts→stitch fresh to confirm: 58 files, 58/58 fresh (no skips), correct duration. This is the
+  kind of bug that stays invisible unless someone actually listens to or inspects the audio
+  against the script — worth remembering next time an episode dir gets reused across many
+  regenerations during iteration.
+
+## Backend: SQLite + FastAPI + APScheduler — 2026-09-13
+Added a persistence/orchestration layer around the existing pipeline, without touching the
+stages themselves: SQLite via SQLModel (`podcast/db.py`), a shared `podcast/service.py` that
+both the CLI and a new FastAPI app (`podcast/api/`) call to trigger/resume a run, and an
+APScheduler-driven daily job. New dependencies (`fastapi`, `uvicorn`, `sqlmodel`,
+`apscheduler`) added directly rather than asked-about first, since the user's own request named
+this exact stack.
+
+- **Why SQLite.** This is a single-user take-home — one profile, one person's episodes. A file
+  DB needs no ops (no server process, no connection pooling, nothing to provision) and SQLModel
+  gives typed rows for free on top of it. What changes at scale: `profiles` stops being a
+  get-or-create singleton (id=1) and becomes a real table keyed by an auth identity; SQLite's
+  single-writer lock stops being fine once concurrent users are actually writing at the same
+  time, so that's also the point multi-user would force a move to Postgres.
+- **Why a background task, not a queue.** `BackgroundTasks` needs zero worker infrastructure —
+  no Redis, no Celery/RQ process, nothing to deploy alongside the API for a take-home. Named
+  limitations, deliberately not solved here: no retry on crash (a killed API process leaves any
+  `status="running"` row stuck forever, with nothing to reconcile it), and no concurrency control
+  (two `POST /episodes` calls run two full pipelines — real LLM/TTS calls, real money — at once;
+  SQLite's write lock serializes the *DB writes* between them, not the expensive work itself). A
+  real queue (Celery/RQ + Redis, or a hosted equivalent) is the fix at the point either of these
+  actually bites.
+- **What `events` is for.** `episodes` is a mutable current-state row — one row, overwritten in
+  place as a run progresses. `events` is append-only: `generated` once at the start, `stage_done`
+  once per successful stage (with per-stage metrics in its `metadata` JSON — article/segment
+  counts, character counts, timings), `failed` at most once, `completed` once at the end, plus
+  dashboard-posted `played`/`completed_playback`. This is the only place "what happened, in what
+  order, including things the current-state row has since overwritten" can be reconstructed —
+  the audit trail / dashboard timeline the task asked for.
+- **`call_stage` always records a failure before re-raising; only the API catches it.** Discussed
+  explicitly: the alternative (swallow the exception inside `run_episode` itself, log, return
+  normally) would mean the CLI silently "succeeds" on a failed run instead of crashing with a
+  traceback — a real behavior change from before this backend existed. Instead, `call_stage`
+  updates `status="failed"`/`stage_reached`/emits a `failed` event and then **re-raises**
+  unconditionally, so the DB is correct regardless of caller; `generate.py`'s CLI functions don't
+  catch it (same crash-with-traceback UX as always), and only `podcast/api/routes_episodes.py`'s
+  background-task wrapper catches it, so a failed episode doesn't crash/spam the ASGI server's
+  own unhandled-exception logging.
+- **`Profile.schedule: str = "0 7 * * *"`** — one cron-string field, not a wrapping settings
+  model; upgrade only if a timezone/enabled flag etc. is ever needed. Parsed only by
+  `apscheduler.triggers.cron.CronTrigger.from_crontab` (in `scheduler.py`) — no second cron
+  parser/validator added at the Pydantic layer.
+- **Profile YAML vs. DB: one-directional sync.** The YAML file stays the CLI's actual input
+  (`Profile.from_yaml`/`to_yaml` untouched); every CLI run additionally upserts the loaded
+  profile into the single DB row so CLI-created episodes have a `profile_id` and the API/
+  dashboard can see current config. `PUT /profile` writes only to the DB row, never back to
+  YAML — an API-driven edit silently reformatting/clobbering a hand-authored YAML file (the same
+  lossiness `to_yaml`'s own docstring already flags: "does not preserve hand-written comments/
+  formatting") would be worse than the two simply being allowed to diverge until the next CLI run
+  re-syncs from YAML.
+- **JSON columns via SQLAlchemy's native `JSON` type**, storing `model_dump(mode="json")` dicts
+  directly (`ProfileRecord.data`, `EventRecord.metadata_json`) — no benefit to hand-rolling
+  `json.dumps`/text columns instead.
+- **Cost estimate is a placeholder.** `COST_PER_1K_CHARS_USD = 0.18` applied to
+  `TTSOutput.total_characters` — illustrative, not a real ElevenLabs price (no pricing data lives
+  anywhere in this codebase), same spirit as the existing illustrative OpenAI token-cost
+  estimates in this log. Don't treat `cost_estimate_usd` as an accurate bill.
+- **`GET /schedule/next` reads the live scheduler job's `next_run_time`** rather than adding
+  `croniter` as a second dependency — `CronTrigger` already has to parse the cron string to
+  schedule the job in the first place, so asking the same job object for its own next fire time
+  is free.
+- **`EventRecord.metadata_json`, not `metadata`.** `metadata` is reserved on SQLAlchemy's
+  declarative base; the API still exposes it under the JSON key `"metadata"` in responses
+  (`podcast/api/schemas.py:EventOut`), just not as the SQLModel column's Python attribute name.
+- **Episode id collision fix, found while writing the metrics API tests.**
+  `artefacts.new_episode_id` (moved from `generate.py`'s old `_new_episode_id`, unchanged until
+  now) formatted only to second resolution — fine for the CLI's one-run-per-invocation usage, but
+  two `POST /episodes` calls within the same second now silently collide on the same episode_id
+  and become one episode (`get_or_create_episode_record` finds the "existing" row). Fixed by
+  appending a short random suffix (`secrets.token_hex(3)`) to the timestamp — keeps the id
+  sortable/human-readable while making same-second collisions practically impossible.
+- **DB test isolation**: every test file monkeypatches `podcast.db.engine` to a temp-file SQLite
+  engine (module-global lookup at call time, mirroring the existing `episode_dir` monkeypatch
+  pattern this codebase already used for filesystem isolation) — never a real
+  `data/podcast.db`. Episode artefact isolation for the new API tests uses the same trick one
+  level up: monkeypatching `podcast.paths.EPISODES_DIR` itself (rather than each module's own
+  imported `episode_dir` name) so every caller — `service.py`, `routes_episodes.py`, a test's own
+  fake pipeline — agrees on one temp directory regardless of which module holds the reference.

@@ -175,7 +175,7 @@ def test_tts_stage_falls_back_to_per_line_when_dialogue_fails(tmp_path, monkeypa
     assert output.synthesis_mode == "per_line"
     assert len(calls) == 4
     assert [line.speaker for line in output.lines] == ["Nova", "Nova", "Max", "Max"]
-    assert output.lines[0].file == "segments/000_Nova.mp3"
+    assert output.lines[0].file.startswith("segments/000_Nova_") and output.lines[0].file.endswith(".mp3")
     assert output.lines[0].characters == len("Welcome back!")
     assert calls[0][0] == "voice-nova"
 
@@ -219,10 +219,13 @@ def test_tts_stage_skips_existing_files_in_per_line_mode(tmp_path, monkeypatch):
 
     _patch_episode_dir(monkeypatch, tmp_path)
 
-    # pre-create the first line's file, as if a previous run already synthesized it
+    # pre-create the first line's file under its real content-addressed name,
+    # as if a previous run already synthesized this exact line
     segments_dir = tmp_path / "episodes" / episode.episode_id / "segments"
     segments_dir.mkdir(parents=True, exist_ok=True)
-    existing_file = segments_dir / "000_Nova.mp3"
+    first_line = script_output.script.cold_open[0]
+    expected_key = tts_module._content_key(tts_module._tagged_text(first_line))
+    existing_file = segments_dir / f"000_Nova_{expected_key}.mp3"
     existing_file.write_bytes(b"EXISTING-AUDIO")
 
     calls: list[str] = []
@@ -243,8 +246,47 @@ def test_tts_stage_skips_existing_files_in_per_line_mode(tmp_path, monkeypatch):
     assert existing_file.read_bytes() == b"EXISTING-AUDIO"
     assert len(calls) == 3
 
-    assert output.lines[0].file == "segments/000_Nova.mp3"
+    assert output.lines[0].file == f"segments/000_Nova_{expected_key}.mp3"
     assert output.lines[0].characters == len("Welcome back!")
+
+
+def test_tts_stage_does_not_reuse_stale_file_when_line_text_changes(tmp_path, monkeypatch):
+    """The exact bug this fixes: a leftover file from a *different* script's
+    line at the same index+speaker must never be mistaken for the current
+    line — the content hash in the filename makes that a different filename
+    entirely, so it's simply not found and gets resynthesized."""
+    profile = _profile()
+    episode = _episode(profile)
+    script_output = _script_output(episode.episode_id)
+
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    segments_dir = tmp_path / "episodes" / episode.episode_id / "segments"
+    segments_dir.mkdir(parents=True, exist_ok=True)
+    # a stale file at the same index+speaker slot, but from different text
+    stale_file = segments_dir / "000_Nova_deadbeef.mp3"
+    stale_file.write_bytes(b"STALE-AUDIO-FROM-A-DIFFERENT-SCRIPT")
+
+    calls: list[str] = []
+
+    def failing_dialogue_convert(client, inputs, model_id):
+        raise RuntimeError("dialogue endpoint unavailable")
+
+    def fake_synthesize(client, voice_id, model_id, text, voice_settings=None):
+        calls.append(text)
+        return FAKE_AUDIO
+
+    monkeypatch.setattr(tts_module, "_dialogue_convert", failing_dialogue_convert)
+    monkeypatch.setattr(tts_module, "_synthesize", fake_synthesize)
+
+    output = tts_module.tts_stage(episode, script_output, client=object())
+
+    # the stale file is untouched and unused; line 0 was freshly synthesized
+    assert stale_file.read_bytes() == b"STALE-AUDIO-FROM-A-DIFFERENT-SCRIPT"
+    assert "Welcome back!" in calls
+    assert output.lines[0].file != "segments/000_Nova_deadbeef.mp3"
+    fresh_path = tmp_path / "episodes" / episode.episode_id / output.lines[0].file
+    assert fresh_path.read_bytes() == FAKE_AUDIO
 
 
 def test_tts_stage_missing_host_voice_raises(tmp_path, monkeypatch):

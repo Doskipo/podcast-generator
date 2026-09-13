@@ -15,6 +15,7 @@ from podcast.models import (
     Article,
     Episode,
     Host,
+    HostStance,
     Interest,
     Line,
     Listener,
@@ -81,6 +82,10 @@ def _outline_output(episode_id: str, source_id: str) -> OutlineOutput:
                     host_take="Nova cares because...",
                     tangent="reminds Nova of a story",
                 ),
+                stances=[
+                    HostStance(host="Nova", attitude="excited", why="it's her home turf"),
+                    HostStance(host="Max", attitude="skeptical", why="wants the numbers"),
+                ],
             )
         ],
     )

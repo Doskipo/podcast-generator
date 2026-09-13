@@ -16,6 +16,7 @@ from podcast.models import (
     CritiqueFlag,
     Episode,
     Host,
+    HostStance,
     Interest,
     Line,
     Listener,
@@ -96,12 +97,23 @@ def _angle() -> Angle:
     return Angle(why_it_matters="w", tension_or_surprise="t", host_take="h", tangent=None)
 
 
+def _stances() -> list[HostStance]:
+    return [
+        HostStance(host="Nova", attitude="excited", why="her home turf"),
+        HostStance(host="Max", attitude="skeptical", why="wants the numbers"),
+    ]
+
+
 def _outline_output(episode_id: str, source_id: str, word_budget: int = 100) -> OutlineOutput:
     outline = Outline(
         title="Test Episode",
         stories=[
             OutlineStory(
-                headline="Something happened", source_ids=[source_id], angle=_angle(), word_budget=word_budget
+                headline="Something happened",
+                source_ids=[source_id],
+                angle=_angle(),
+                word_budget=word_budget,
+                stances=_stances(),
             )
         ],
     )
@@ -269,7 +281,7 @@ def test_critique_stage_does_not_flag_segment_within_budget(tmp_path, monkeypatc
 
 
 def test_over_length_line_indices_excludes_recurring_bit_segment():
-    long_line = "word " * 40  # 40 words, over MAX_LINE_WORDS (35)
+    long_line = "word " * 50  # 50 words, over MAX_LINE_WORDS (45)
     script = Script(
         title="t",
         cold_open=[],
@@ -359,3 +371,84 @@ def test_critique_stage_flags_repeated_correct(tmp_path, monkeypatch):
     critique_module.critique_stage(episode, script_output, articles, outline_output, client=object())
 
     assert "repeated_correct" in captured_prompt["system"]
+
+
+def test_build_prompts_includes_written_not_spoken_criterion(tmp_path, monkeypatch):
+    profile = _profile()
+    script = _script("abcd1234")
+    outline = _outline_output("ep1", "abcd1234").outline
+
+    system_prompt, _user_prompt = critique_module._build_prompts(profile, script, outline)
+
+    assert "written_not_spoken" in system_prompt
+
+
+def test_host_brevity_flags_detects_terse_host():
+    script = Script(
+        title="t",
+        cold_open=[],
+        segments=[
+            Segment(
+                headline="h",
+                source_ids=[],
+                lines=[
+                    Line(speaker="Max", text="Sure."),
+                    Line(speaker="Max", text="Right."),
+                    Line(speaker="Max", text="Yeah."),
+                    Line(speaker="Max", text="This one line from Max is long enough to not count as short at all."),
+                    Line(speaker="Nova", text="I think this deserves a much longer, more expansive kind of line."),
+                ],
+            )
+        ],
+        outro=[],
+    )
+    flags = critique_module._host_brevity_flags(script)
+    assert len(flags) == 1
+    assert flags[0].host == "Max"
+    assert flags[0].line_count == 4
+    assert flags[0].short_line_fraction == 0.75  # 3 of 4 lines are <= 8 words
+
+
+def test_host_brevity_flags_ignores_host_within_threshold():
+    script = Script(
+        title="t",
+        cold_open=[],
+        segments=[
+            Segment(
+                headline="h",
+                source_ids=[],
+                lines=[
+                    Line(speaker="Max", text="Sure."),
+                    Line(speaker="Max", text="This is a longer line that pushes the average up nicely."),
+                    Line(speaker="Max", text="And here's another longer line to keep the ratio healthy."),
+                ],
+            )
+        ],
+        outro=[],
+    )
+    flags = critique_module._host_brevity_flags(script)
+    assert flags == []
+
+
+def test_critique_stage_reports_terse_hosts(tmp_path, monkeypatch):
+    profile = _profile()
+    episode = _episode(profile)
+    articles = [_article("abcd1234")]
+    script_output = _script_output(episode.episode_id, "abcd1234")
+    # make every one of Max's lines short
+    script_output.script.segments[0].lines[1] = Line(speaker="Max", text="Sure.")
+    script_output.script.outro = [Line(speaker="Max", text="Bye.")]
+    outline_output = _outline_output(episode.episode_id, "abcd1234")
+
+    monkeypatch.setattr(
+        critique_module,
+        "_generate_critique",
+        lambda client, model, system_prompt, user_prompt: Critique(flags=[]),
+    )
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    output = critique_module.critique_stage(episode, script_output, articles, outline_output, client=object())
+
+    terse_by_host = {f.host: f for f in output.terse_hosts}
+    assert "Max" in terse_by_host
+    assert "Nova" not in terse_by_host

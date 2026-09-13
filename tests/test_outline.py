@@ -14,6 +14,7 @@ from podcast.models import (
     Article,
     Episode,
     Host,
+    HostStance,
     Interest,
     Listener,
     Outline,
@@ -83,6 +84,15 @@ def _angle(tangent: str | None = "a tangent") -> Angle:
     return Angle(why_it_matters="it matters", tension_or_surprise="a twist", host_take="Nova cares", tangent=tangent)
 
 
+def _stances() -> list[HostStance]:
+    """One stance per default test host (Nova, Max) — most tests don't care
+    about stance content, just that every story has a valid one per host."""
+    return [
+        HostStance(host="Nova", attitude="excited", why="it's her home turf"),
+        HostStance(host="Max", attitude="skeptical", why="wants the numbers"),
+    ]
+
+
 def _patch_episode_dir(monkeypatch, tmp_path: Path) -> None:
     def _episode_dir(episode_id: str) -> Path:
         d = tmp_path / "episodes" / episode_id
@@ -100,12 +110,12 @@ def test_outline_stage_persists_and_uses_cheap_model(tmp_path, monkeypatch):
 
     fixture_outline = Outline(
         title="Test Episode",
-        stories=[OutlineStory(headline="Something happened", source_ids=["abcd1234"], angle=_angle())],
+        stories=[OutlineStory(headline="Something happened", source_ids=["abcd1234"], angle=_angle(), stances=_stances())],
     )
     monkeypatch.setattr(
         outline_module,
         "_generate_outline",
-        lambda client, model, system_prompt, user_prompt, bit_ids: fixture_outline,
+        lambda client, model, system_prompt, user_prompt, bit_ids, host_names: fixture_outline,
     )
     _patch_episode_dir(monkeypatch, tmp_path)
 
@@ -129,12 +139,12 @@ def test_outline_stage_rejects_unknown_source_ids(tmp_path, monkeypatch):
 
     fixture_outline = Outline(
         title="Test Episode",
-        stories=[OutlineStory(headline="Something happened", source_ids=["unknown99"], angle=_angle())],
+        stories=[OutlineStory(headline="Something happened", source_ids=["unknown99"], angle=_angle(), stances=_stances())],
     )
     monkeypatch.setattr(
         outline_module,
         "_generate_outline",
-        lambda client, model, system_prompt, user_prompt, bit_ids: fixture_outline,
+        lambda client, model, system_prompt, user_prompt, bit_ids, host_names: fixture_outline,
     )
     _patch_episode_dir(monkeypatch, tmp_path)
 
@@ -152,14 +162,18 @@ def test_outline_stage_rejects_unknown_recurring_bit(tmp_path, monkeypatch):
         title="Test Episode",
         stories=[
             OutlineStory(
-                headline="Something happened", source_ids=["abcd1234"], angle=_angle(), recurring_bit="not-a-real-bit"
+                headline="Something happened",
+                source_ids=["abcd1234"],
+                angle=_angle(),
+                recurring_bit="not-a-real-bit",
+                stances=_stances(),
             )
         ],
     )
     monkeypatch.setattr(
         outline_module,
         "_generate_outline",
-        lambda client, model, system_prompt, user_prompt, bit_ids: fixture_outline,
+        lambda client, model, system_prompt, user_prompt, bit_ids, host_names: fixture_outline,
     )
     _patch_episode_dir(monkeypatch, tmp_path)
 
@@ -176,14 +190,14 @@ def test_outline_stage_rejects_recurring_bit_over_its_max(tmp_path, monkeypatch)
     fixture_outline = Outline(
         title="Test Episode",
         stories=[
-            OutlineStory(headline="Story 1", source_ids=["a1"], angle=_angle(tangent=None), recurring_bit="pin-drop"),
-            OutlineStory(headline="Story 2", source_ids=["a2"], angle=_angle(tangent=None), recurring_bit="pin-drop"),
+            OutlineStory(headline="Story 1", source_ids=["a1"], angle=_angle(tangent=None), recurring_bit="pin-drop", stances=_stances()),
+            OutlineStory(headline="Story 2", source_ids=["a2"], angle=_angle(tangent=None), recurring_bit="pin-drop", stances=_stances()),
         ],
     )
     monkeypatch.setattr(
         outline_module,
         "_generate_outline",
-        lambda client, model, system_prompt, user_prompt, bit_ids: fixture_outline,
+        lambda client, model, system_prompt, user_prompt, bit_ids, host_names: fixture_outline,
     )
     _patch_episode_dir(monkeypatch, tmp_path)
 
@@ -225,7 +239,7 @@ def test_outline_stage_passes_effective_ids_to_generate_outline(tmp_path, monkey
 
     captured = {}
 
-    def fake_generate_outline(client, model, system_prompt, user_prompt, bit_ids):
+    def fake_generate_outline(client, model, system_prompt, user_prompt, bit_ids, host_names):
         captured["bit_ids"] = bit_ids
         return Outline(
             title="Test Episode",
@@ -235,6 +249,7 @@ def test_outline_stage_passes_effective_ids_to_generate_outline(tmp_path, monkey
                     source_ids=["abcd1234"],
                     angle=_angle(tangent=None),
                     recurring_bit="the-logistical-pin-drop",
+                    stances=_stances(),
                 )
             ],
         )
@@ -248,13 +263,20 @@ def test_outline_stage_passes_effective_ids_to_generate_outline(tmp_path, monkey
     assert output.outline.stories[0].recurring_bit == "the-logistical-pin-drop"
 
 
+_STANCE_DICTS = [
+    {"host": "Nova", "attitude": "excited", "why": "her home turf", "arc": None},
+    {"host": "Max", "attitude": "skeptical", "why": "wants the numbers", "arc": None},
+]
+
+
 def test_response_model_constrains_recurring_bit_to_known_ids():
-    model = outline_module._response_model(["the-logistical-pin-drop"])
+    model = outline_module._response_model(["the-logistical-pin-drop"], ["Nova", "Max"])
 
     story = {
         "headline": "h",
         "source_ids": ["a"],
         "angle": {"why_it_matters": "w", "tension_or_surprise": "t", "host_take": "h", "tangent": "a"},
+        "stances": _STANCE_DICTS,
     }
 
     # a known id validates
@@ -272,7 +294,21 @@ def test_response_model_constrains_recurring_bit_to_known_ids():
 
 
 def test_response_model_forces_null_when_no_bits_configured():
-    model = outline_module._response_model([])
+    model = outline_module._response_model([], ["Nova", "Max"])
+
+    story = {
+        "headline": "h",
+        "source_ids": ["a"],
+        "angle": {"why_it_matters": "w", "tension_or_surprise": "t", "host_take": "h", "tangent": "a"},
+        "stances": _STANCE_DICTS,
+    }
+
+    with pytest.raises(ValueError):
+        model.model_validate({"title": "t", "stories": [{**story, "recurring_bit": "anything"}]})
+
+
+def test_response_model_constrains_stance_host_to_known_names():
+    model = outline_module._response_model([], ["Nova", "Max"])
 
     story = {
         "headline": "h",
@@ -280,8 +316,12 @@ def test_response_model_forces_null_when_no_bits_configured():
         "angle": {"why_it_matters": "w", "tension_or_surprise": "t", "host_take": "h", "tangent": "a"},
     }
 
+    ok = model.model_validate({"title": "t", "stories": [{**story, "stances": _STANCE_DICTS}]})
+    assert [s.host for s in ok.stories[0].stances] == ["Nova", "Max"]
+
+    bad_stances = [{"host": "Carol", "attitude": "excited", "why": "x", "arc": None}]
     with pytest.raises(ValueError):
-        model.model_validate({"title": "t", "stories": [{**story, "recurring_bit": "anything"}]})
+        model.model_validate({"title": "t", "stories": [{**story, "stances": bad_stances}]})
 
 
 def test_outline_stage_rejects_a_segment_with_both_bit_and_tangent(tmp_path, monkeypatch):
@@ -298,13 +338,14 @@ def test_outline_stage_rejects_a_segment_with_both_bit_and_tangent(tmp_path, mon
                 source_ids=["abcd1234"],
                 angle=_angle(tangent="a real tangent"),  # tangent AND a bit — not allowed together
                 recurring_bit="pin-drop",
+                stances=_stances(),
             )
         ],
     )
     monkeypatch.setattr(
         outline_module,
         "_generate_outline",
-        lambda client, model, system_prompt, user_prompt, bit_ids: fixture_outline,
+        lambda client, model, system_prompt, user_prompt, bit_ids, host_names: fixture_outline,
     )
     _patch_episode_dir(monkeypatch, tmp_path)
 
@@ -331,14 +372,14 @@ def test_outline_stage_allocates_word_budget_proportional_to_score(tmp_path, mon
     fixture_outline = Outline(
         title="Test Episode",
         stories=[
-            OutlineStory(headline="High story", source_ids=["high"], angle=_angle(tangent=None)),
-            OutlineStory(headline="Low story", source_ids=["low"], angle=_angle(tangent=None)),
+            OutlineStory(headline="High story", source_ids=["high"], angle=_angle(tangent=None), stances=_stances()),
+            OutlineStory(headline="Low story", source_ids=["low"], angle=_angle(tangent=None), stances=_stances()),
         ],
     )
     monkeypatch.setattr(
         outline_module,
         "_generate_outline",
-        lambda client, model, system_prompt, user_prompt, bit_ids: fixture_outline,
+        lambda client, model, system_prompt, user_prompt, bit_ids, host_names: fixture_outline,
     )
     _patch_episode_dir(monkeypatch, tmp_path)
 
@@ -354,8 +395,37 @@ def test_outline_stage_allocates_word_budget_proportional_to_score(tmp_path, mon
 
 def test_allocate_word_budgets_falls_back_to_equal_split_when_all_scores_zero():
     stories = [
-        OutlineStory(headline="a", source_ids=["a"], angle=_angle(tangent=None)),
-        OutlineStory(headline="b", source_ids=["b"], angle=_angle(tangent=None)),
+        OutlineStory(headline="a", source_ids=["a"], angle=_angle(tangent=None), stances=_stances()),
+        OutlineStory(headline="b", source_ids=["b"], angle=_angle(tangent=None), stances=_stances()),
     ]
     budgets = outline_module._allocate_word_budgets(stories, score_by_id={}, total_words=100)
     assert budgets == [50, 50]
+
+
+def test_outline_stage_rejects_missing_stance_for_a_host(tmp_path, monkeypatch):
+    profile = _profile()
+    episode = _episode(profile)
+    articles = [_article("abcd1234")]
+    rank_output = _rank_output(episode.episode_id, articles)
+
+    fixture_outline = Outline(
+        title="Test Episode",
+        stories=[
+            OutlineStory(
+                headline="Something happened",
+                source_ids=["abcd1234"],
+                angle=_angle(tangent=None),
+                # only Nova has a stance — Max is missing
+                stances=[HostStance(host="Nova", attitude="excited", why="her home turf")],
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        outline_module,
+        "_generate_outline",
+        lambda client, model, system_prompt, user_prompt, bit_ids, host_names: fixture_outline,
+    )
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    with pytest.raises(ValueError, match="exactly one stance per host"):
+        outline_module.outline_stage(episode, rank_output, client=object())
