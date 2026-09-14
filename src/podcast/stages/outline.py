@@ -53,7 +53,19 @@ COLD_OPEN_OUTRO_RESERVE_WORDS = 120
 
 def _render_article_brief(article: Article) -> str:
     snippet = article.summary or (article.text or "")[:ARTICLE_BRIEF_CHARS] or "(no summary)"
-    return f"[{article.source_id}] {article.title} — {snippet}"
+    marker = "[EVERGREEN PRIMER] " if article.source == "evergreen" else ""
+    return f"{marker}[{article.source_id}] {article.title} — {snippet}"
+
+
+_EVERGREEN_INSTRUCTION = (
+    "Some articles are marked [EVERGREEN PRIMER] — these aren't news, they're background/"
+    "reference material for an interest that had nothing fresh this episode (see "
+    "docs/decisions.md, \"Evergreen fallback\"). Give each one its own story, never merged "
+    "with a news article. Its angle should introduce or deepen the topic for a listener who "
+    "already likes it — no urgency, no \"breaking\" framing, don't pretend it's new. "
+    "host_take and tension_or_surprise should still say something genuine (a compelling "
+    "detail or angle worth dwelling on), just never framed as a recent development.\n"
+)
 
 
 def _render_host_brief(host: Host) -> str:
@@ -75,6 +87,7 @@ def _build_prompts(profile: Profile, articles: list[Article]) -> tuple[str, str]
     )
 
     host_names = ", ".join(f'"{host.name}"' for host in podcast.hosts)
+    evergreen_line = _EVERGREEN_INSTRUCTION if any(a.source == "evergreen" for a in articles) else ""
 
     system_prompt = (
         "You are the showrunner for a two-host podcast, planning the episode before any "
@@ -82,6 +95,7 @@ def _build_prompts(profile: Profile, articles: list[Article]) -> tuple[str, str]
         f"Hosts:\n{host_lines}\n\n"
         f"Listener: {podcast.listener.name}.\n\n"
         f"Recurring bits available (referenced by id):\n{bits_block}\n\n"
+        f"{evergreen_line}"
         "For the articles given, decide: an episode title, the order to cover the "
         "stories in, and for each story an angle — why it matters, the tension or "
         "surprise in it, which host should take the lead on it and why, and (optionally) "
@@ -190,7 +204,11 @@ def _generate_outline(
 
 
 def _validate_outline(
-    outline: Outline, known_ids: set[str], recurring_bits: list[RecurringBit], host_names: list[str]
+    outline: Outline,
+    known_ids: set[str],
+    recurring_bits: list[RecurringBit],
+    host_names: list[str],
+    evergreen_ids: set[str] = frozenset(),
 ) -> None:
     known_bit_ids = {bit.effective_id for bit in recurring_bits}
     max_per_bit = {bit.effective_id: bit.max_per_episode for bit in recurring_bits}
@@ -200,6 +218,12 @@ def _validate_outline(
     bit_counts: dict[str, int] = {}
     for story in outline.stories:
         used_ids.update(story.source_ids)
+        story_ids = set(story.source_ids)
+        if story_ids & evergreen_ids and story_ids - evergreen_ids:
+            raise ValueError(
+                f"story {story.headline!r} mixes an evergreen primer source with a real news source "
+                f"({sorted(story_ids)}) — a primer must be its own story, never merged with news"
+            )
         if story.recurring_bit is not None:
             if story.recurring_bit not in known_bit_ids:
                 raise ValueError(f"outline references unknown recurring bit id: {story.recurring_bit!r}")
@@ -274,6 +298,7 @@ def outline_stage(episode: Episode, rank_output: RankOutput, client: OpenAI | No
     profile = episode.profile
     articles = rank_output.selected
     known_ids = {a.source_id for a in articles}
+    evergreen_ids = {a.source_id for a in articles if a.source == "evergreen"}
     bit_ids = [bit.effective_id for bit in profile.podcast.recurring_bits]
     host_names = [host.name for host in profile.podcast.hosts]
 
@@ -291,7 +316,7 @@ def outline_stage(episode: Episode, rank_output: RankOutput, client: OpenAI | No
         return outline
 
     def validate(outline: Outline) -> None:
-        _validate_outline(outline, known_ids, profile.podcast.recurring_bits, host_names)
+        _validate_outline(outline, known_ids, profile.podcast.recurring_bits, host_names, evergreen_ids)
 
     outline = generate_with_retry(generate, validate, user_prompt, stage_name="outline")
 
@@ -303,6 +328,11 @@ def outline_stage(episode: Episode, rank_output: RankOutput, client: OpenAI | No
     budgets = _allocate_word_budgets(outline.stories, score_by_id, total_words)
     for story, budget in zip(outline.stories, budgets):
         story.word_budget = budget
+
+    # is_primer is code-derived, not asked of the model — same reasoning as
+    # word_budget above. See docs/decisions.md ("Evergreen fallback").
+    for story in outline.stories:
+        story.is_primer = bool(set(story.source_ids) & evergreen_ids)
 
     output = OutlineOutput(
         episode_id=episode.episode_id,

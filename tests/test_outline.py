@@ -530,6 +530,103 @@ def test_outline_stage_raises_after_a_second_failed_validation(tmp_path, monkeyp
     assert len(prompts) == 2  # exactly one retry, no more
 
 
+def _evergreen_article(source_id: str) -> Article:
+    now = datetime.now(timezone.utc)
+    return Article(
+        source_id=source_id,
+        url=f"https://en.wikipedia.org/wiki/{source_id}",
+        title=f"Wiki {source_id}",
+        feed_url=f"https://en.wikipedia.org/wiki/{source_id}",
+        published_at=now,
+        fetched_at=now,
+        summary="a primer",
+        text="primer text " * 20,
+        source="evergreen",
+        interest="testing",
+    )
+
+
+def test_outline_stage_marks_a_primer_story_is_primer(tmp_path, monkeypatch):
+    profile = _profile()
+    episode = _episode(profile)
+    articles = [_evergreen_article("wiki1")]
+    rank_output = _rank_output(episode.episode_id, articles)
+
+    fixture_outline = Outline(
+        title="Test Episode",
+        stories=[OutlineStory(headline="A primer", source_ids=["wiki1"], angle=_angle(tangent=None), stances=_stances())],
+    )
+    monkeypatch.setattr(
+        outline_module,
+        "_generate_outline",
+        lambda client, model, system_prompt, user_prompt, bit_ids, host_names: (fixture_outline, _FIXTURE_USAGE),
+    )
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    output = outline_module.outline_stage(episode, rank_output, client=object())
+
+    assert output.outline.stories[0].is_primer is True
+
+
+def test_outline_stage_leaves_a_news_story_is_primer_false(tmp_path, monkeypatch):
+    profile = _profile()
+    episode = _episode(profile)
+    articles = [_article("abcd1234")]
+    rank_output = _rank_output(episode.episode_id, articles)
+
+    fixture_outline = Outline(
+        title="Test Episode",
+        stories=[OutlineStory(headline="News", source_ids=["abcd1234"], angle=_angle(tangent=None), stances=_stances())],
+    )
+    monkeypatch.setattr(
+        outline_module,
+        "_generate_outline",
+        lambda client, model, system_prompt, user_prompt, bit_ids, host_names: (fixture_outline, _FIXTURE_USAGE),
+    )
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    output = outline_module.outline_stage(episode, rank_output, client=object())
+
+    assert output.outline.stories[0].is_primer is False
+
+
+def test_outline_stage_rejects_a_story_mixing_evergreen_and_news_sources(tmp_path, monkeypatch):
+    profile = _profile()
+    episode = _episode(profile)
+    articles = [_article("news1"), _evergreen_article("wiki1")]
+    rank_output = _rank_output(episode.episode_id, articles)
+
+    fixture_outline = Outline(
+        title="Test Episode",
+        stories=[
+            OutlineStory(
+                headline="Mixed", source_ids=["news1", "wiki1"], angle=_angle(tangent=None), stances=_stances()
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        outline_module,
+        "_generate_outline",
+        lambda client, model, system_prompt, user_prompt, bit_ids, host_names: (fixture_outline, _FIXTURE_USAGE),
+    )
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    with pytest.raises(ValueError, match="mixes an evergreen primer"):
+        outline_module.outline_stage(episode, rank_output, client=object())
+
+
+def test_build_prompts_includes_evergreen_marker_and_instruction_only_when_present():
+    profile = _profile()
+
+    system_prompt, user_prompt = outline_module._build_prompts(profile, [_evergreen_article("wiki1")])
+    assert "[EVERGREEN PRIMER]" in user_prompt
+    assert "introduce or deepen the topic" in system_prompt
+
+    system_prompt_news_only, user_prompt_news_only = outline_module._build_prompts(profile, [_article("news1")])
+    assert "[EVERGREEN PRIMER]" not in user_prompt_news_only
+    assert "introduce or deepen the topic" not in system_prompt_news_only
+
+
 def test_outline_stage_refuses_zero_selected_articles(monkeypatch):
     profile = _profile()
     episode = _episode(profile)

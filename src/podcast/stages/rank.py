@@ -20,6 +20,7 @@ import httpx
 import trafilatura
 from openai import OpenAI
 
+from podcast import evergreen
 from podcast.env import require_env
 from podcast.models import (
     Article,
@@ -331,6 +332,45 @@ def _select_bucket(
     return scored_entries, selected_articles, backfilled
 
 
+def _fill_empty_interests_with_evergreen(
+    interests: list[Interest],
+    budgets: dict[str, int],
+    scores: dict[str, ArticleScore],
+    scored: list[RankedArticle],
+    selected: list[Article],
+) -> int:
+    """One Wikipedia primer per interest that ended up with zero real
+    (fetched) selected candidates, mutating `scores`/`scored`/`selected` in
+    place exactly as if it were a normal scored+selected candidate — so the
+    caller's existing global sort (`scores[a.source_id].score * weight`)
+    needs no changes to account for it. Skips an interest that already has
+    real content (news always wins — evergreen never competes with or
+    displaces it) or that got zero budget this run (a weighting decision,
+    not a content gap — evergreen only fills a genuine gap). Returns how
+    many primers were added. See docs/decisions.md ("Evergreen fallback")."""
+    covered = {a.interest for a in selected}
+    added = 0
+    for interest in interests:
+        if interest.topic in covered:
+            continue
+        if budgets.get(interest.topic, 0) <= 0:
+            continue
+        primer = evergreen.fetch_primer(interest)
+        if primer is None:
+            continue
+        score = ArticleScore(
+            source_id=primer.source_id,
+            interest=interest.topic,
+            score=evergreen.EVERGREEN_SCORE,
+            reason="evergreen primer — no fresh candidates this run",
+        )
+        scores[primer.source_id] = score
+        scored.append(RankedArticle(article=primer, interest=interest.topic, score=score.score, reason=score.reason, selected=True))
+        selected.append(primer)
+        added += 1
+    return added
+
+
 def rank_stage(episode: Episode, fetch_output: FetchOutput, client: OpenAI | None = None) -> RankOutput:
     if client is None:
         client = OpenAI(api_key=require_env("OPENAI_API_KEY"))
@@ -365,6 +405,10 @@ def rank_stage(episode: Episode, fetch_output: FetchOutput, client: OpenAI | Non
     if total_backfilled:
         logger.info("backfilled %d candidate(s) after extraction failures", total_backfilled)
 
+    evergreen_count = _fill_empty_interests_with_evergreen(profile.interests, budgets, scores, scored, selected)
+    if evergreen_count:
+        logger.info("evergreen: filled %d empty interest(s) with a Wikipedia primer", evergreen_count)
+
     selected.sort(key=lambda a: scores[a.source_id].score * weights.get(a.interest or EXTRA_BUCKET, 0.0), reverse=True)
 
     output = RankOutput(
@@ -373,6 +417,7 @@ def rank_stage(episode: Episode, fetch_output: FetchOutput, client: OpenAI | Non
         model=profile.llm.model,
         total_budget=total_budget,
         backfilled=total_backfilled,
+        evergreen_count=evergreen_count,
         scored=scored,
         selected=selected,
         usage=usage,

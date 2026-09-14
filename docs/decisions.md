@@ -1209,6 +1209,72 @@ so the dashboard isn't empty on a fresh DB), and built the actual `/dashboard` R
   default rootdir-relative import mode) rather than folded into the existing route handler's own
   queries.
 
+## Evergreen fallback for empty interests — 2026-09-14
+An interest with zero real (fetched) selected candidates after rank's normal selection +
+backfill used to just contribute nothing — and if *every* interest came up empty in the same
+run, the grounding guard (`service._check_grounding`) stopped the episode at `no_content`
+entirely (see "Grounding guard"). Now `rank_stage` tries one Wikipedia primer per empty
+interest before giving up on it, via a new `podcast/evergreen.py`.
+
+- **Why news always wins.** `_fill_empty_interests_with_evergreen` (rank.py) only ever
+  considers an interest that (a) has zero real selected candidates *and* (b) got a nonzero
+  budget slot this run — it never runs for an interest that already has real content, and
+  never competes with real news within that interest's own bucket (there's nothing to compete
+  with by construction: it only fires when the bucket is empty). Zero budget is left alone on
+  purpose too — that's the profile's own weighting saying this interest shouldn't get airtime
+  this episode at all, a deliberate choice evergreen has no business overriding; it only fills
+  a genuine content gap, never a weighting gap.
+- **Why the fixed 0.5 score.** `evergreen.EVERGREEN_SCORE` sits between the rank scoring
+  rubric's "tangential" (0.4) and "clearly related" (0.7) tiers (see "Rank stage"'s scoring
+  call). It never needs to outrank a real candidate in the same bucket (there isn't one, per
+  above) — what it actually controls is the *global* cross-interest ordering
+  (`selected.sort(key=lambda a: scores[a.source_id].score * weight...)`, unchanged): a primer
+  sits in the middle of the pack, so a good news day from other interests (scoring 0.7-1.0)
+  still leads the episode, and a primer only edges out another interest's own weak/tangential
+  real news if that interest's best candidate scored under 0.5 — which is roughly the point
+  where a human would call that candidate a stretch anyway.
+- **Why a flat-file cache, not the existing profile-YAML query cache.** `Interest.queries`
+  caches into the profile YAML via `Profile.to_yaml` (see "Freshness gap fix"), but that only
+  ever runs from the CLI (`generate.py:run()` calls `ensure_interest_queries` before
+  `service.run_episode`) — `POST /episodes` (the API path) never touches the profile file at
+  all. A YAML-based evergreen cache would silently never engage for API-triggered runs, which
+  is now the primary path (the scheduler, the settings UI). `paths.EVERGREEN_CACHE_PATH` (a
+  flat `data/evergreen_cache.json`, keyed by interest topic) works identically from either
+  entrypoint, at the cost of being one more small file outside the per-episode manifest
+  convention — justified since this state is explicitly cross-episode (anti-repetition memory),
+  not something any single episode owns.
+- **Why 7 days, and why "reuse anyway" as the fallback.** The cache's job isn't performance
+  (search+extract is cheap and not on any per-request hot path) — it's remembering the last
+  page used per topic so the *next* empty-interest attempt within a week picks the next-best
+  search result instead of repeating verbatim (a listener hearing the identical primer two
+  days running reads as broken). Past 7 days, repeating is fine/expected — a slow-news topic's
+  best-matching Wikipedia page doesn't stop being the best match just because it was used a
+  week ago. If the only search candidate *is* the recently-used page, `_pick_title` reuses it
+  anyway rather than returning `None` — a repeated primer still beats the alternative
+  (`no_content`), so the anti-repeat rule yields to the "no_content only when even evergreen
+  fails" requirement rather than the other way around.
+- **`OutlineStory.is_primer`** is code-derived after the outline LLM call
+  (`bool(source_ids & evergreen_ids)`), the same "compute it, don't ask the model to
+  self-report it" reasoning already established for `word_budget`. The outline prompt still
+  gets an explicit `[EVERGREEN PRIMER]` marker + framing instruction (own story, "introduce or
+  deepen the topic... no urgency" — see `_EVERGREEN_INSTRUCTION`) so the *model* writes the
+  right angle in the first place; `_validate_outline` backstops it in code by rejecting a story
+  that mixes an evergreen source with a real-news source, the same structural-schema-first,
+  code-check-as-backstop pattern as the existing recurring-bit/tangent mutual-exclusion check.
+  `script.py:_render_outline_story` restates the no-news-framing instruction per-story (a
+  separate LLM call with no memory of outline's own prompt) exactly where tangent/recurring-bit
+  framing already lives, rather than a global system-prompt rule that would apply to every
+  segment regardless of whether it's actually a primer.
+- **`RankOutput.evergreen_count`** is its own field, not folded into `backfilled` — a primer is
+  a different *source* substituting for an empty interest, not a within-pool reorder after a
+  same-source candidate failed, so conflating the two would blur two genuinely different signals
+  in the audit trail (`ranked.json`, the print summary, and the `stage_done` event metadata all
+  report it alongside `backfilled`).
+- **`service.py` needed zero changes.** `_check_grounding` already only checks
+  `if rank_output.selected: return True` — since evergreen fills `selected` *inside*
+  `rank_stage` before it ever returns, `no_content` already only fires once every interest's
+  evergreen attempt has also come back empty, exactly as asked, for free.
+
 ## Future work.
 - Add **suggest topics from previous episodes** from the previous podcasts. So it generatos a topic 
 (or a bunch of topics) for a podcast for you.

@@ -245,6 +245,26 @@ def test_supports_audio_tags():
     assert script_module.supports_audio_tags("eleven_turbo_v2_5") is False
 
 
+def test_render_outline_story_includes_primer_instruction_only_when_is_primer():
+    story = OutlineStory(
+        headline="A primer",
+        source_ids=["abcd1234"],
+        angle=Angle(why_it_matters="w", tension_or_surprise="t", host_take="h", tangent=None),
+        stances=[
+            HostStance(host="Nova", attitude="curious", why="w"),
+            HostStance(host="Max", attitude="curious", why="w"),
+        ],
+        is_primer=True,
+    )
+    rendered = script_module._render_outline_story(story, recurring_bits_by_id={})
+    assert "not news" in rendered
+    assert "already likes it" in rendered
+
+    news_story = story.model_copy(update={"is_primer": False})
+    rendered_news = script_module._render_outline_story(news_story, recurring_bits_by_id={})
+    assert "not news" not in rendered_news
+
+
 def test_build_prompts_states_cold_open_identification_rule(tmp_path):
     profile = _profile()
     outline_output = _outline_output("ep1", "abcd1234")

@@ -84,6 +84,17 @@ def _patch_episode_dir(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(rank_module, "episode_dir", _episode_dir)
 
 
+def _disable_evergreen(monkeypatch) -> None:
+    """Default for every test that isn't specifically exercising the
+    evergreen fallback: without this, a test whose interest ends up with
+    zero real selected candidates would make a real Wikipedia network call
+    (see rank_module._fill_empty_interests_with_evergreen) — "no network in
+    tests" per CLAUDE.md. Tests that *do* want to exercise evergreen
+    override this with their own monkeypatch of rank_module.evergreen.
+    fetch_primer after calling this."""
+    monkeypatch.setattr(rank_module.evergreen, "fetch_primer", lambda interest: None)
+
+
 def _patch_resolve_succeeds(monkeypatch) -> None:
     """Every URL resolves to itself with fixture html that extracts cleanly."""
     monkeypatch.setattr(rank_module, "_resolve_and_download", lambda url: (url, GOOD_HTML))
@@ -144,6 +155,7 @@ def test_rank_stage_selects_per_interest_proportional_to_weight(tmp_path, monkey
     monkeypatch.setattr(rank_module, "_score_batch", _scorer(scores))
     _patch_resolve_succeeds(monkeypatch)
     _patch_episode_dir(monkeypatch, tmp_path)
+    _disable_evergreen(monkeypatch)
 
     output = rank_module.rank_stage(episode, fetch_output, client=object())
 
@@ -177,6 +189,7 @@ def test_rank_stage_orders_selection_globally_by_score_times_weight(tmp_path, mo
     monkeypatch.setattr(rank_module, "_score_batch", _scorer({"a1": 0.6, "b1": 0.9}))
     _patch_resolve_succeeds(monkeypatch)
     _patch_episode_dir(monkeypatch, tmp_path)
+    _disable_evergreen(monkeypatch)
 
     output = rank_module.rank_stage(episode, fetch_output, client=object())
 
@@ -196,6 +209,7 @@ def test_rank_stage_extracts_text_only_for_selected(tmp_path, monkeypatch):
     monkeypatch.setattr(rank_module, "_score_batch", _scorer({"high": 0.9, "low": 0.1}))
     _patch_resolve_succeeds(monkeypatch)
     _patch_episode_dir(monkeypatch, tmp_path)
+    _disable_evergreen(monkeypatch)
 
     output = rank_module.rank_stage(episode, fetch_output, client=object())
 
@@ -226,6 +240,7 @@ def test_rank_stage_drops_when_no_candidate_left_to_backfill(tmp_path, monkeypat
     monkeypatch.setattr(rank_module, "_score_batch", _scorer({"a1": 0.9}))
     _patch_resolve_fails(monkeypatch)  # resolution fails for everything
     _patch_episode_dir(monkeypatch, tmp_path)
+    _disable_evergreen(monkeypatch)
 
     output = rank_module.rank_stage(episode, fetch_output, client=object())
 
@@ -252,6 +267,7 @@ def test_rank_stage_backfills_after_extraction_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(rank_module, "_score_batch", _scorer({"best": 0.9, "second": 0.5}))
     monkeypatch.setattr(rank_module, "_resolve_and_download", fake_resolve)
     _patch_episode_dir(monkeypatch, tmp_path)
+    _disable_evergreen(monkeypatch)
 
     output = rank_module.rank_stage(episode, fetch_output, client=object())
 
@@ -282,6 +298,7 @@ def test_rank_stage_backfills_when_redirect_resolution_fails(tmp_path, monkeypat
     monkeypatch.setattr(rank_module, "_score_batch", _scorer({"best": 0.9, "second": 0.5}))
     monkeypatch.setattr(rank_module, "_resolve_and_download", fake_resolve)
     _patch_episode_dir(monkeypatch, tmp_path)
+    _disable_evergreen(monkeypatch)
 
     output = rank_module.rank_stage(episode, fetch_output, client=object())
 
@@ -311,6 +328,7 @@ def test_rank_stage_treats_msn_final_url_as_unextractable_and_backfills(tmp_path
     monkeypatch.setattr(rank_module, "_score_batch", _scorer({"best": 0.9, "second": 0.5}))
     monkeypatch.setattr(rank_module, "_resolve_and_download", fake_resolve)
     _patch_episode_dir(monkeypatch, tmp_path)
+    _disable_evergreen(monkeypatch)
 
     output = rank_module.rank_stage(episode, fetch_output, client=object())
 
@@ -335,6 +353,7 @@ def test_rank_stage_persists_resolved_final_url(tmp_path, monkeypatch):
     monkeypatch.setattr(rank_module, "_score_batch", _scorer({"a1": 0.9}))
     monkeypatch.setattr(rank_module, "_resolve_and_download", lambda url: (resolved_url, GOOD_HTML))
     _patch_episode_dir(monkeypatch, tmp_path)
+    _disable_evergreen(monkeypatch)
 
     output = rank_module.rank_stage(episode, fetch_output, client=object())
 
@@ -444,6 +463,7 @@ def test_rank_stage_persists_token_usage(tmp_path, monkeypatch):
     monkeypatch.setattr(rank_module, "_score_batch", _scorer({"a1": 0.9}))
     _patch_resolve_succeeds(monkeypatch)
     _patch_episode_dir(monkeypatch, tmp_path)
+    _disable_evergreen(monkeypatch)
 
     output = rank_module.rank_stage(episode, fetch_output, client=object())
 
@@ -454,6 +474,113 @@ def test_rank_stage_persists_token_usage(tmp_path, monkeypatch):
     assert reparsed.usage == [_FIXTURE_USAGE]
 
 
+def _fake_primer(topic: str) -> Article:
+    now = datetime.now(timezone.utc)
+    return Article(
+        source_id=f"ever-{topic}",
+        url=f"https://en.wikipedia.org/wiki/{topic}",
+        title=topic,
+        feed_url=f"https://en.wikipedia.org/wiki/{topic}",
+        published_at=now,
+        fetched_at=now,
+        summary="a primer",
+        text="a primer " * 20,
+        source="evergreen",
+        interest=topic,
+    )
+
+
+def test_rank_stage_fills_an_empty_interest_with_an_evergreen_primer(tmp_path, monkeypatch):
+    profile = _profile(
+        interests=[
+            Interest(topic="has-news", weight=0.6, feeds=["https://example.com/a.xml"]),
+            Interest(topic="empty", weight=0.4, feeds=["https://example.com/b.xml"]),
+        ],
+        duration_minutes=6,  # total_budget = 4; both interests get budget > 0
+    )
+    episode = _episode(profile)
+    # "empty" has zero fetched articles at all — never enters by_bucket
+    fetch_output = _fetch_output(episode.episode_id, [_article("a1", "has-news")])
+
+    monkeypatch.setattr(rank_module, "_score_batch", _scorer({"a1": 0.9}))
+    monkeypatch.setattr(rank_module.evergreen, "fetch_primer", lambda interest: _fake_primer(interest.topic))
+    _patch_resolve_succeeds(monkeypatch)
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    output = rank_module.rank_stage(episode, fetch_output, client=object())
+
+    assert output.evergreen_count == 1
+    primer = next(a for a in output.selected if a.interest == "empty")
+    assert primer.source == "evergreen"
+    scored_primer = next(ra for ra in output.scored if ra.article.source == "evergreen")
+    assert scored_primer.score == rank_module.evergreen.EVERGREEN_SCORE
+    assert scored_primer.selected is True
+
+
+def test_rank_stage_skips_evergreen_for_an_interest_with_real_selected_content(tmp_path, monkeypatch):
+    profile = _profile(interests=[Interest(topic="only", weight=1.0, feeds=["https://example.com/only.xml"])])
+    episode = _episode(profile)
+    fetch_output = _fetch_output(episode.episode_id, [_article("a1", "only")])
+
+    calls: list[str] = []
+    monkeypatch.setattr(rank_module, "_score_batch", _scorer({"a1": 0.9}))
+    monkeypatch.setattr(rank_module.evergreen, "fetch_primer", lambda interest: calls.append(interest.topic) or _fake_primer(interest.topic))
+    _patch_resolve_succeeds(monkeypatch)
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    output = rank_module.rank_stage(episode, fetch_output, client=object())
+
+    assert output.evergreen_count == 0
+    assert calls == []  # "only" already has real content — news wins, evergreen never even called
+
+
+def test_rank_stage_skips_evergreen_for_an_interest_with_zero_budget(tmp_path, monkeypatch):
+    # duration_minutes=1 -> total_budget = 1; the much-lower-weighted
+    # interest gets floored to 0 slots by the largest-remainder allocation.
+    profile = _profile(
+        interests=[
+            Interest(topic="heavy", weight=0.95, feeds=["https://example.com/a.xml"]),
+            Interest(topic="starved", weight=0.05, feeds=["https://example.com/b.xml"]),
+        ],
+        duration_minutes=1,
+    )
+    episode = _episode(profile)
+    fetch_output = _fetch_output(episode.episode_id, [_article("a1", "heavy")])
+
+    calls: list[str] = []
+    monkeypatch.setattr(rank_module, "_score_batch", _scorer({"a1": 0.9}))
+    monkeypatch.setattr(rank_module.evergreen, "fetch_primer", lambda interest: calls.append(interest.topic) or _fake_primer(interest.topic))
+    _patch_resolve_succeeds(monkeypatch)
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    output = rank_module.rank_stage(episode, fetch_output, client=object())
+
+    assert output.evergreen_count == 0
+    assert "starved" not in calls  # zero budget is a weighting decision, not a content gap
+
+
+def test_rank_stage_evergreen_count_defaults_to_zero_when_evergreen_finds_nothing(tmp_path, monkeypatch):
+    profile = _profile(
+        interests=[
+            Interest(topic="has-news", weight=0.6, feeds=["https://example.com/a.xml"]),
+            Interest(topic="empty", weight=0.4, feeds=["https://example.com/b.xml"]),
+        ],
+        duration_minutes=6,
+    )
+    episode = _episode(profile)
+    fetch_output = _fetch_output(episode.episode_id, [_article("a1", "has-news")])
+
+    monkeypatch.setattr(rank_module, "_score_batch", _scorer({"a1": 0.9}))
+    _disable_evergreen(monkeypatch)  # evergreen itself also finds nothing
+    _patch_resolve_succeeds(monkeypatch)
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    output = rank_module.rank_stage(episode, fetch_output, client=object())
+
+    assert output.evergreen_count == 0
+    assert all(a.interest != "empty" for a in output.selected)
+
+
 def test_total_budget_derived_from_duration():
     assert rank_module._total_budget(8) == 5  # round(8/1.5) == 5
     assert rank_module._total_budget(1) == 1  # never zero
@@ -462,6 +589,7 @@ def test_total_budget_derived_from_duration():
 def test_rank_stage_requires_openai_api_key(tmp_path, monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     _patch_episode_dir(monkeypatch, tmp_path)
+    _disable_evergreen(monkeypatch)
 
     profile = _profile(interests=[Interest(topic="only", weight=1.0, feeds=["https://example.com/only.xml"])])
     episode = _episode(profile)

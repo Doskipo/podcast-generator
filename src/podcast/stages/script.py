@@ -126,6 +126,18 @@ def _render_outline_story(story: OutlineStory, recurring_bits_by_id: dict[str, R
         # id if it's somehow missing rather than crashing script generation.
         bit_line = f"\n  Recurring bit here: {bit.name} — {bit.description}" if bit else f"\n  Recurring bit here: {story.recurring_bit}"
     tangent_line = f"\n  Possible tangent: {angle.tangent}" if angle.tangent else ""
+    # outline_stage sets this from whether the story's sources are a
+    # Wikipedia primer (podcast.evergreen), not asked of this stage's own
+    # model — same "no news framing" instruction outline.py already gave
+    # the outline model for this story, restated here since script.py is a
+    # separate LLM call with no memory of that earlier prompt. See
+    # docs/decisions.md ("Evergreen fallback").
+    primer_line = (
+        "\n  This is a primer/background segment, not news — introduce or deepen the topic for a "
+        "listener who already likes it. No urgency or \"breaking\" language, no recent-developments framing."
+        if story.is_primer
+        else ""
+    )
     stances_block = "\n".join(f"    {_render_stance(s)}" for s in story.stances)
     return (
         f"- {story.headline} (sources: {', '.join(story.source_ids)})\n"
@@ -136,6 +148,7 @@ def _render_outline_story(story: OutlineStory, recurring_bits_by_id: dict[str, R
         f"  Stances:\n{stances_block}"
         f"{tangent_line}"
         f"{bit_line}"
+        f"{primer_line}"
     )
 
 

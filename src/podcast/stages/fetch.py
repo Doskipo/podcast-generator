@@ -207,7 +207,12 @@ def _normalize_title(title: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()
 
 
-def _source_id(url: str) -> str:
+def source_id_for_url(url: str) -> str:
+    """Stable short id for an article/page url — first 8 hex chars of
+    sha1(url). Public (not `_`-prefixed): podcast.evergreen reuses this
+    exact scheme for Wikipedia primer urls rather than a second copy — same
+    "make it public when a second module needs it" precedent as
+    script.py:flatten_lines (see docs/decisions.md, "Script rebuild")."""
     return hashlib.sha1(url.encode("utf-8")).hexdigest()[:8]
 
 
@@ -302,7 +307,7 @@ def fetch_stage(profile: Profile, episode_id: str) -> FetchOutput:
     # it now runs in the rank stage, only for the candidates selected there.
     articles = [
         Article(
-            source_id=_source_id(c["url"]),
+            source_id=source_id_for_url(c["url"]),
             url=c["url"],
             title=c["title"],
             feed_url=c["feed_url"],

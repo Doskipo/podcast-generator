@@ -204,11 +204,17 @@ def _step_rank(
         record,
         "rank",
         lambda: rank_stage(episode, fetch_output),
-        extra_metadata=lambda r: {"selected": len(r.selected), "backfilled": r.backfilled, "total_budget": r.total_budget},
+        extra_metadata=lambda r: {
+            "selected": len(r.selected),
+            "backfilled": r.backfilled,
+            "evergreen": r.evergreen_count,
+            "total_budget": r.total_budget,
+        },
     )
     print(
         f"episode {episode.episode_id}: ranked {len(rank_output.selected)} "
-        f"of budget {rank_output.total_budget} articles ({rank_output.backfilled} backfilled)"
+        f"of budget {rank_output.total_budget} articles "
+        f"({rank_output.backfilled} backfilled, {rank_output.evergreen_count} evergreen)"
     )
     return None if until == "rank" else rank_output
 

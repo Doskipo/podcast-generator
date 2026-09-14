@@ -316,6 +316,12 @@ class RankOutput(BaseModel):
     model: str
     total_budget: int
     backfilled: int  # selected candidates that weren't in the original per-interest top-k
+    # Interests that had zero real (fetched) selected candidates and got a
+    # Wikipedia primer instead (podcast.evergreen) — a different source,
+    # not a within-pool reorder, so distinct from `backfilled`. See
+    # docs/decisions.md ("Evergreen fallback"). Defaults to 0 so a manifest
+    # persisted before this field existed still validates.
+    evergreen_count: int = 0
     scored: list[RankedArticle]  # every candidate that was scored, for audit
     selected: list[Article]  # the chosen subset, text extracted, in global order
     # Every scoring call's token usage — see TokenUsage. Defaults to [] so a
@@ -361,6 +367,14 @@ class OutlineStory(BaseModel):
     # story's rank score. Computed in code by outline_stage after the LLM
     # call (not asked of the model) — defaults to 0 until then.
     word_budget: int = 0
+    # True when any of this story's source_ids is a podcast.evergreen
+    # primer (Article.source == "evergreen") — computed in code by
+    # outline_stage after the LLM call, the same "derivable, not asked of
+    # the model" reasoning as word_budget, not part of the structured-
+    # output response schema. script.py reads this to write the segment as
+    # background/reference rather than news. See docs/decisions.md
+    # ("Evergreen fallback").
+    is_primer: bool = False
     stances: list[HostStance]  # one per host in profile.podcast.hosts — validated in outline.py
 
 
