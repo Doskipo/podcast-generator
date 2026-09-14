@@ -25,8 +25,11 @@ from podcast.models import (
     RankOutput,
     RecurringBit,
     Style,
+    TokenUsage,
 )
 from podcast.stages import outline as outline_module
+
+_FIXTURE_USAGE = TokenUsage(model="m", prompt_tokens=10, completion_tokens=5)
 
 
 def _host(name: str) -> Host:
@@ -115,7 +118,7 @@ def test_outline_stage_persists_and_uses_cheap_model(tmp_path, monkeypatch):
     monkeypatch.setattr(
         outline_module,
         "_generate_outline",
-        lambda client, model, system_prompt, user_prompt, bit_ids, host_names: fixture_outline,
+        lambda client, model, system_prompt, user_prompt, bit_ids, host_names: (fixture_outline, _FIXTURE_USAGE),
     )
     _patch_episode_dir(monkeypatch, tmp_path)
 
@@ -144,7 +147,7 @@ def test_outline_stage_rejects_unknown_source_ids(tmp_path, monkeypatch):
     monkeypatch.setattr(
         outline_module,
         "_generate_outline",
-        lambda client, model, system_prompt, user_prompt, bit_ids, host_names: fixture_outline,
+        lambda client, model, system_prompt, user_prompt, bit_ids, host_names: (fixture_outline, _FIXTURE_USAGE),
     )
     _patch_episode_dir(monkeypatch, tmp_path)
 
@@ -173,7 +176,7 @@ def test_outline_stage_rejects_unknown_recurring_bit(tmp_path, monkeypatch):
     monkeypatch.setattr(
         outline_module,
         "_generate_outline",
-        lambda client, model, system_prompt, user_prompt, bit_ids, host_names: fixture_outline,
+        lambda client, model, system_prompt, user_prompt, bit_ids, host_names: (fixture_outline, _FIXTURE_USAGE),
     )
     _patch_episode_dir(monkeypatch, tmp_path)
 
@@ -197,7 +200,7 @@ def test_outline_stage_rejects_recurring_bit_over_its_max(tmp_path, monkeypatch)
     monkeypatch.setattr(
         outline_module,
         "_generate_outline",
-        lambda client, model, system_prompt, user_prompt, bit_ids, host_names: fixture_outline,
+        lambda client, model, system_prompt, user_prompt, bit_ids, host_names: (fixture_outline, _FIXTURE_USAGE),
     )
     _patch_episode_dir(monkeypatch, tmp_path)
 
@@ -241,17 +244,20 @@ def test_outline_stage_passes_effective_ids_to_generate_outline(tmp_path, monkey
 
     def fake_generate_outline(client, model, system_prompt, user_prompt, bit_ids, host_names):
         captured["bit_ids"] = bit_ids
-        return Outline(
-            title="Test Episode",
-            stories=[
-                OutlineStory(
-                    headline="Something happened",
-                    source_ids=["abcd1234"],
-                    angle=_angle(tangent=None),
-                    recurring_bit="the-logistical-pin-drop",
-                    stances=_stances(),
-                )
-            ],
+        return (
+            Outline(
+                title="Test Episode",
+                stories=[
+                    OutlineStory(
+                        headline="Something happened",
+                        source_ids=["abcd1234"],
+                        angle=_angle(tangent=None),
+                        recurring_bit="the-logistical-pin-drop",
+                        stances=_stances(),
+                    )
+                ],
+            ),
+            _FIXTURE_USAGE,
         )
 
     monkeypatch.setattr(outline_module, "_generate_outline", fake_generate_outline)
@@ -352,7 +358,7 @@ def test_outline_stage_rejects_a_segment_with_both_bit_and_tangent(tmp_path, mon
     monkeypatch.setattr(
         outline_module,
         "_generate_outline",
-        lambda client, model, system_prompt, user_prompt, bit_ids, host_names: fixture_outline,
+        lambda client, model, system_prompt, user_prompt, bit_ids, host_names: (fixture_outline, _FIXTURE_USAGE),
     )
     _patch_episode_dir(monkeypatch, tmp_path)
 
@@ -386,7 +392,7 @@ def test_outline_stage_allocates_word_budget_proportional_to_score(tmp_path, mon
     monkeypatch.setattr(
         outline_module,
         "_generate_outline",
-        lambda client, model, system_prompt, user_prompt, bit_ids, host_names: fixture_outline,
+        lambda client, model, system_prompt, user_prompt, bit_ids, host_names: (fixture_outline, _FIXTURE_USAGE),
     )
     _patch_episode_dir(monkeypatch, tmp_path)
 
@@ -430,7 +436,7 @@ def test_outline_stage_rejects_missing_stance_for_a_host(tmp_path, monkeypatch):
     monkeypatch.setattr(
         outline_module,
         "_generate_outline",
-        lambda client, model, system_prompt, user_prompt, bit_ids, host_names: fixture_outline,
+        lambda client, model, system_prompt, user_prompt, bit_ids, host_names: (fixture_outline, _FIXTURE_USAGE),
     )
     _patch_episode_dir(monkeypatch, tmp_path)
 
@@ -474,7 +480,8 @@ def test_outline_stage_retries_once_then_succeeds_after_a_bad_outline(tmp_path, 
 
     def fake_generate_outline(client, model, system_prompt, user_prompt, bit_ids, host_names):
         prompts.append(user_prompt)
-        return invalid_outline if len(prompts) == 1 else valid_outline
+        outline = invalid_outline if len(prompts) == 1 else valid_outline
+        return outline, _FIXTURE_USAGE
 
     monkeypatch.setattr(outline_module, "_generate_outline", fake_generate_outline)
     _patch_episode_dir(monkeypatch, tmp_path)
@@ -485,6 +492,9 @@ def test_outline_stage_retries_once_then_succeeds_after_a_bad_outline(tmp_path, 
     assert len(prompts) == 2
     assert prompts[0] == prompts[1].split("\n\nYour previous response was invalid:")[0]  # original kept intact
     assert "exactly one stance per host" in prompts[1]  # the validation error, fed back verbatim
+    # both attempts are billed API calls — both counted, not just the one that
+    # ultimately passed validation
+    assert output.usage == [_FIXTURE_USAGE, _FIXTURE_USAGE]
 
 
 def test_outline_stage_raises_after_a_second_failed_validation(tmp_path, monkeypatch):
@@ -509,7 +519,7 @@ def test_outline_stage_raises_after_a_second_failed_validation(tmp_path, monkeyp
 
     def fake_generate_outline(client, model, system_prompt, user_prompt, bit_ids, host_names):
         prompts.append(user_prompt)
-        return always_invalid
+        return always_invalid, _FIXTURE_USAGE
 
     monkeypatch.setattr(outline_module, "_generate_outline", fake_generate_outline)
     _patch_episode_dir(monkeypatch, tmp_path)

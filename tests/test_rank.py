@@ -27,6 +27,7 @@ from podcast.models import (
     RankOutput,
     ScoreBatch,
     Style,
+    TokenUsage,
 )
 from podcast.stages import rank as rank_module
 
@@ -93,6 +94,9 @@ def _patch_resolve_fails(monkeypatch) -> None:
     monkeypatch.setattr(rank_module, "_resolve_and_download", lambda url: (None, None))
 
 
+_FIXTURE_USAGE = TokenUsage(model="m", prompt_tokens=10, completion_tokens=5)
+
+
 def _scorer(scores_by_id: dict[str, float]) -> callable:
     """A fake _score_batch that scores each article from a fixed mapping,
     defaulting to 0.5 for anything not listed, and correctly echoes the
@@ -101,16 +105,19 @@ def _scorer(scores_by_id: dict[str, float]) -> callable:
 
     def fake_score_batch(client, model, interest_topic, description, batch):
         label = interest_topic or "general"
-        return ScoreBatch(
-            scores=[
-                ArticleScore(
-                    source_id=a.source_id,
-                    interest=label,
-                    score=scores_by_id.get(a.source_id, 0.5),
-                    reason="fixture",
-                )
-                for a in batch
-            ]
+        return (
+            ScoreBatch(
+                scores=[
+                    ArticleScore(
+                        source_id=a.source_id,
+                        interest=label,
+                        score=scores_by_id.get(a.source_id, 0.5),
+                        reason="fixture",
+                    )
+                    for a in batch
+                ]
+            ),
+            _FIXTURE_USAGE,
         )
 
     return fake_score_batch
@@ -344,8 +351,13 @@ def test_score_articles_includes_interest_description(monkeypatch):
     def fake_score_batch(client, model, interest_topic, description, batch):
         captured["interest_topic"] = interest_topic
         captured["description"] = description
-        return ScoreBatch(
-            scores=[ArticleScore(source_id="a1", interest=interest_topic, score=0.9, reason="mentions a rocket launch")]
+        return (
+            ScoreBatch(
+                scores=[
+                    ArticleScore(source_id="a1", interest=interest_topic, score=0.9, reason="mentions a rocket launch")
+                ]
+            ),
+            _FIXTURE_USAGE,
         )
 
     monkeypatch.setattr(rank_module, "_score_batch", fake_score_batch)
@@ -363,11 +375,14 @@ def test_score_articles_never_mixes_interests_in_one_batch(monkeypatch):
 
     def fake_score_batch(client, model, interest_topic, description, batch):
         seen_batches.append((interest_topic, {a.source_id for a in batch}))
-        return ScoreBatch(
-            scores=[
-                ArticleScore(source_id=a.source_id, interest=interest_topic, score=0.5, reason="fixture")
-                for a in batch
-            ]
+        return (
+            ScoreBatch(
+                scores=[
+                    ArticleScore(source_id=a.source_id, interest=interest_topic, score=0.5, reason="fixture")
+                    for a in batch
+                ]
+            ),
+            _FIXTURE_USAGE,
         )
 
     monkeypatch.setattr(rank_module, "_score_batch", fake_score_batch)
@@ -389,17 +404,18 @@ def test_score_articles_rejects_and_rescores_mismatched_echo(monkeypatch):
         calls.append(len(batch))
         if len(calls) == 1:
             # first attempt: echoes the wrong interest — must be rejected
-            return ScoreBatch(scores=[ArticleScore(source_id="a1", interest="beta", score=0.9, reason="wrong")])
+            return ScoreBatch(scores=[ArticleScore(source_id="a1", interest="beta", score=0.9, reason="wrong")]), _FIXTURE_USAGE
         # retry: echoes correctly this time
-        return ScoreBatch(scores=[ArticleScore(source_id="a1", interest="alpha", score=0.8, reason="right")])
+        return ScoreBatch(scores=[ArticleScore(source_id="a1", interest="alpha", score=0.8, reason="right")]), _FIXTURE_USAGE
 
     monkeypatch.setattr(rank_module, "_score_batch", fake_score_batch)
 
-    scores = rank_module._score_articles(client=object(), model="m", articles=articles, descriptions=descriptions)
+    scores, usage = rank_module._score_articles(client=object(), model="m", articles=articles, descriptions=descriptions)
 
     assert len(calls) == 2  # rejected once, re-scored once
     assert scores["a1"].score == 0.8
     assert scores["a1"].reason == "right"
+    assert usage == [_FIXTURE_USAGE, _FIXTURE_USAGE]  # both the rejected and the retried call are counted
 
 
 def test_score_articles_falls_back_after_persistent_echo_mismatch(monkeypatch):
@@ -408,16 +424,34 @@ def test_score_articles_falls_back_after_persistent_echo_mismatch(monkeypatch):
 
     def fake_score_batch(client, model, interest_topic, description, batch):
         # always echoes the wrong interest, even on retry
-        return ScoreBatch(scores=[ArticleScore(source_id="a1", interest="beta", score=0.9, reason="wrong")])
+        return ScoreBatch(scores=[ArticleScore(source_id="a1", interest="beta", score=0.9, reason="wrong")]), _FIXTURE_USAGE
 
     monkeypatch.setattr(rank_module, "_score_batch", fake_score_batch)
 
-    scores = rank_module._score_articles(client=object(), model="m", articles=articles, descriptions=descriptions)
+    scores, _usage = rank_module._score_articles(client=object(), model="m", articles=articles, descriptions=descriptions)
 
     # gives up after MAX_SCORE_ATTEMPTS rather than trusting a score that
     # never proved it was scored against the right interest
     assert scores["a1"].score == 0.0
     assert scores["a1"].reason == "interest echo mismatch"
+
+
+def test_rank_stage_persists_token_usage(tmp_path, monkeypatch):
+    profile = _profile(interests=[Interest(topic="only", weight=1.0, feeds=["https://example.com/only.xml"])])
+    episode = _episode(profile)
+    fetch_output = _fetch_output(episode.episode_id, [_article("a1", "only")])
+
+    monkeypatch.setattr(rank_module, "_score_batch", _scorer({"a1": 0.9}))
+    _patch_resolve_succeeds(monkeypatch)
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    output = rank_module.rank_stage(episode, fetch_output, client=object())
+
+    assert output.usage == [_FIXTURE_USAGE]  # one scoring batch, one call
+
+    ranked_path = tmp_path / "episodes" / episode.episode_id / "ranked.json"
+    reparsed = RankOutput.model_validate_json(ranked_path.read_text(encoding="utf-8"))
+    assert reparsed.usage == [_FIXTURE_USAGE]
 
 
 def test_total_budget_derived_from_duration():

@@ -36,6 +36,7 @@ from podcast.models import (
     Script,
     ScriptOutput,
     SegmentBudgetFlag,
+    TokenUsage,
 )
 from podcast.paths import episode_dir
 from podcast.stages.script import MAX_LINE_WORDS, flatten_lines, validate_source_ids
@@ -162,7 +163,7 @@ def _build_prompts(profile: Profile, script: Script, outline: Outline) -> tuple[
     return system_prompt, user_prompt
 
 
-def _generate_critique(client: OpenAI, model: str, system_prompt: str, user_prompt: str) -> Critique:
+def _generate_critique(client: OpenAI, model: str, system_prompt: str, user_prompt: str) -> tuple[Critique, TokenUsage]:
     """Boundary around the OpenAI call — the seam tests monkeypatch."""
     completion = client.chat.completions.parse(
         model=model,
@@ -172,7 +173,10 @@ def _generate_critique(client: OpenAI, model: str, system_prompt: str, user_prom
         ],
         response_format=Critique,
     )
-    return completion.choices[0].message.parsed
+    usage = TokenUsage(
+        model=model, prompt_tokens=completion.usage.prompt_tokens, completion_tokens=completion.usage.completion_tokens
+    )
+    return completion.choices[0].message.parsed, usage
 
 
 def _apply_critique(script: Script, critique: Critique) -> Script:
@@ -276,8 +280,15 @@ def critique_stage(
     system_prompt, user_prompt = _build_prompts(profile, original_script, outline)
     known_ids = {a.source_id for a in articles}
 
+    # See outline.py's outline_stage for why this is a local accumulator
+    # rather than a tuple threaded through generate_with_retry: a rejected
+    # first attempt still cost real tokens.
+    usage: list[TokenUsage] = []
+
     def generate(prompt: str) -> Critique:
-        return _generate_critique(client, model, system_prompt, prompt)
+        critique, call_usage = _generate_critique(client, model, system_prompt, prompt)
+        usage.append(call_usage)
+        return critique
 
     def validate(critique: Critique) -> None:
         # Grounding can only be re-checked on the script the critique would
@@ -302,6 +313,7 @@ def critique_stage(
         total_words=total_words,
         over_budget_segments=over_budget_segments,
         terse_hosts=terse_hosts,
+        usage=usage,
     )
 
     out_path = episode_dir(episode.episode_id) / "critique.json"

@@ -60,6 +60,45 @@ class EventOut(BaseModel):
     metadata: dict = Field(default_factory=dict)
 
 
+class EpisodesByStatusOut(BaseModel):
+    status: str
+    count: int
+
+
+class StageCostOut(BaseModel):
+    stage: str  # rank | outline | script | critique | tts
+    provider: str  # openai | elevenlabs
+    cost_usd: float
+
+
+class StageDurationOut(BaseModel):
+    stage: str
+    avg_elapsed_s: float
+    count: int
+
+
+class TopicCountOut(BaseModel):
+    interest: str
+    count: int
+
+
+class DailyPointOut(BaseModel):
+    date: str  # YYYY-MM-DD
+    episodes_created: int
+    plays: int
+    completions: int
+    mocked: bool  # true if any row behind this day's counts is mocked demo data
+
+
+class RecentFailureOut(BaseModel):
+    episode_id: str
+    status: str  # failed | no_content
+    stage_reached: str | None
+    reason: str | None
+    created_at: datetime
+    mocked: bool
+
+
 class MetricsSummary(BaseModel):
     total_episodes: int
     done: int
@@ -68,6 +107,24 @@ class MetricsSummary(BaseModel):
     total_characters: int
     total_cost_estimate_usd: float
     avg_duration_s: float | None
+
+    # Extended fields — see podcast.metrics.aggregate_summary for how these
+    # are computed and docs/decisions.md ("Dashboard metrics") for why each
+    # was chosen.
+    no_content: int
+    episodes_by_status: list[EpisodesByStatusOut]
+    cost_by_stage: list[StageCostOut]
+    avg_cost_per_episode_usd: float | None
+    avg_stage_duration_s: list[StageDurationOut]
+    topic_distribution: list[TopicCountOut]
+    plays_total: int
+    completions_total: int
+    completion_rate: float | None
+    d7_retention: float | None
+    interests_with_no_content: list[TopicCountOut]
+    daily_series: list[DailyPointOut]
+    recent_failures: list[RecentFailureOut]
+    has_mocked_data: bool
 
 
 class NextRunOut(BaseModel):

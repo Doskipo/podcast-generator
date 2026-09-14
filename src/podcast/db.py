@@ -65,6 +65,23 @@ class EpisodeRecord(SQLModel, table=True):
     # zero selected articles and stops the pipeline here instead. See
     # docs/decisions.md ("Grounding guard").
     no_content_interests: list[str] | None = Field(default=None, sa_column=Column(JSON))
+    # True only for rows written by `podcast seed-metrics` (see
+    # podcast.seed_metrics) — never set by the real pipeline (run_episode/
+    # service.py never touches this field). The dashboard uses it to label
+    # demo data and to know a mocked row has no manifest files on disk to
+    # read cost/topic data from (see mock_cost_by_stage/mock_topic_counts
+    # below and docs/decisions.md, "Dashboard metrics").
+    mocked: bool = Field(default=False)
+    # Only set (and only meaningful) on a mocked row: a real episode's cost
+    # breakdown is always read from its persisted manifests (podcast.metrics.
+    # episode_cost_breakdown) — a mocked episode has no manifest files, so
+    # its plausible {stage: {provider: cost_usd}} breakdown is stored here
+    # directly instead. Shape: {"rank": {"openai": 0.004}, "tts": {"elevenlabs": 0.18}, ...}.
+    mock_cost_by_stage: dict | None = Field(default=None, sa_column=Column(JSON))
+    # Only set on a mocked row: a plausible {interest_topic: count} airtime
+    # distribution, standing in for what podcast.metrics.topic_distribution
+    # would otherwise tally from a real episode's ranked.json.
+    mock_topic_counts: dict | None = Field(default=None, sa_column=Column(JSON))
 
 
 class EventRecord(SQLModel, table=True):
@@ -85,6 +102,11 @@ class EventRecord(SQLModel, table=True):
     # SQLAlchemy's declarative base. The API exposes this under the JSON key
     # "metadata" (see podcast.api.schemas.EventOut).
     metadata_json: dict | None = Field(default=None, sa_column=Column(JSON))
+    # True only for rows written by `podcast seed-metrics` — see
+    # EpisodeRecord.mocked above. Real events (service.emit_event, the only
+    # other writer of this table) never set this, so "real events are never
+    # mocked" holds structurally, not just by convention.
+    mocked: bool = Field(default=False)
 
 
 def init_db() -> None:
@@ -95,20 +117,35 @@ def init_db() -> None:
     _migrate_add_missing_columns()
 
 
+# (table, column, SQL type) added after that table's first release — every
+# entry here is a column now declared on the SQLModel class above that an
+# existing sqlite file from before it existed won't have yet.
+_ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
+    ("episodes", "no_content_interests", "JSON"),
+    ("episodes", "mocked", "BOOLEAN DEFAULT 0"),
+    ("episodes", "mock_cost_by_stage", "JSON"),
+    ("episodes", "mock_topic_counts", "JSON"),
+    ("events", "mocked", "BOOLEAN DEFAULT 0"),
+]
+
+
 def _migrate_add_missing_columns() -> None:
     """SQLModel.metadata.create_all only creates missing TABLES, never alters
-    an existing one — a real data/podcast.db from before `no_content_interests`
-    existed would otherwise crash the first time this code reads/writes an
-    EpisodeRecord. Minimal, additive-only migration: add any column declared
-    on EpisodeRecord that the actual table doesn't have yet. No down-migration,
-    no rename/drop support, no other tables — this app has exactly one
-    additive column so far; reach for a real migration tool (Alembic) if that
-    changes."""
+    an existing one — a real data/podcast.db from before one of these
+    columns existed would otherwise crash the first time this code reads/
+    writes that row. Minimal, additive-only migration: add whichever of
+    _ADDITIVE_COLUMNS the actual table doesn't have yet. No down-migration,
+    no rename/drop support — reach for a real migration tool (Alembic) if
+    this list grows much past a handful of columns."""
     with engine.connect() as conn:
-        existing = {row[1] for row in conn.exec_driver_sql("PRAGMA table_info(episodes)").fetchall()}
-        if "no_content_interests" not in existing:
-            conn.exec_driver_sql("ALTER TABLE episodes ADD COLUMN no_content_interests JSON")
-            conn.commit()
+        existing_by_table: dict[str, set[str]] = {}
+        for table, column, sql_type in _ADDITIVE_COLUMNS:
+            if table not in existing_by_table:
+                existing_by_table[table] = {row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})").fetchall()}
+            if column not in existing_by_table[table]:
+                conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}")
+                existing_by_table[table].add(column)
+        conn.commit()
 
 
 def get_session() -> Iterator[Session]:

@@ -33,6 +33,7 @@ from podcast.models import (
     Profile,
     RankOutput,
     RecurringBit,
+    TokenUsage,
 )
 from podcast.paths import episode_dir
 
@@ -167,7 +168,7 @@ def _convert_story(story_response: BaseModel, host_names: list[str]) -> OutlineS
 
 def _generate_outline(
     client: OpenAI, model: str, system_prompt: str, user_prompt: str, bit_ids: list[str], host_names: list[str]
-) -> Outline:
+) -> tuple[Outline, TokenUsage]:
     """Boundary around the OpenAI call — the seam tests monkeypatch. Builds
     the bit_ids/host_names-constrained schema (see _response_model), then
     converts the result back to the canonical Outline via _convert_story."""
@@ -182,7 +183,10 @@ def _generate_outline(
     )
     parsed = completion.choices[0].message.parsed
     stories = [_convert_story(story, host_names) for story in parsed.stories]
-    return Outline(title=parsed.title, stories=stories)
+    usage = TokenUsage(
+        model=model, prompt_tokens=completion.usage.prompt_tokens, completion_tokens=completion.usage.completion_tokens
+    )
+    return Outline(title=parsed.title, stories=stories), usage
 
 
 def _validate_outline(
@@ -275,8 +279,16 @@ def outline_stage(episode: Episode, rank_output: RankOutput, client: OpenAI | No
 
     system_prompt, user_prompt = _build_prompts(profile, articles)
 
+    # A local accumulator, not a tuple threaded through generate_with_retry:
+    # a first attempt that fails *validation* still made a real, billed API
+    # call, so its usage must be counted too — not just the attempt that
+    # ultimately succeeds. Keeps generate_with_retry itself generic/untouched.
+    usage: list[TokenUsage] = []
+
     def generate(prompt: str) -> Outline:
-        return _generate_outline(client, profile.llm.model, system_prompt, prompt, bit_ids, host_names)
+        outline, call_usage = _generate_outline(client, profile.llm.model, system_prompt, prompt, bit_ids, host_names)
+        usage.append(call_usage)
+        return outline
 
     def validate(outline: Outline) -> None:
         _validate_outline(outline, known_ids, profile.podcast.recurring_bits, host_names)
@@ -297,6 +309,7 @@ def outline_stage(episode: Episode, rank_output: RankOutput, client: OpenAI | No
         generated_at=datetime.now(timezone.utc),
         model=profile.llm.model,
         outline=outline,
+        usage=usage,
     )
 
     out_path = episode_dir(episode.episode_id) / "outline.json"

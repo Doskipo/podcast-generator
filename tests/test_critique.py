@@ -29,8 +29,11 @@ from podcast.models import (
     ScriptOutput,
     Segment,
     Style,
+    TokenUsage,
 )
 from podcast.stages import critique as critique_module
+
+_FIXTURE_USAGE = TokenUsage(model="m", prompt_tokens=10, completion_tokens=5)
 
 
 def _host(name: str) -> Host:
@@ -143,7 +146,7 @@ def test_critique_stage_rewrites_only_flagged_lines(tmp_path, monkeypatch):
     monkeypatch.setattr(
         critique_module,
         "_generate_critique",
-        lambda client, model, system_prompt, user_prompt: fixture_critique,
+        lambda client, model, system_prompt, user_prompt: (fixture_critique, _FIXTURE_USAGE),
     )
     _patch_episode_dir(monkeypatch, tmp_path)
 
@@ -194,7 +197,7 @@ def test_critique_stage_splits_a_flagged_line_into_multiple_lines(tmp_path, monk
     monkeypatch.setattr(
         critique_module,
         "_generate_critique",
-        lambda client, model, system_prompt, user_prompt: fixture_critique,
+        lambda client, model, system_prompt, user_prompt: (fixture_critique, _FIXTURE_USAGE),
     )
     _patch_episode_dir(monkeypatch, tmp_path)
 
@@ -226,7 +229,7 @@ def test_critique_stage_ignores_out_of_range_line_index(tmp_path, monkeypatch):
     monkeypatch.setattr(
         critique_module,
         "_generate_critique",
-        lambda client, model, system_prompt, user_prompt: fixture_critique,
+        lambda client, model, system_prompt, user_prompt: (fixture_critique, _FIXTURE_USAGE),
     )
     _patch_episode_dir(monkeypatch, tmp_path)
 
@@ -247,7 +250,7 @@ def test_critique_stage_flags_segment_over_word_budget(tmp_path, monkeypatch):
     monkeypatch.setattr(
         critique_module,
         "_generate_critique",
-        lambda client, model, system_prompt, user_prompt: Critique(flags=[]),
+        lambda client, model, system_prompt, user_prompt: (Critique(flags=[]), _FIXTURE_USAGE),
     )
     _patch_episode_dir(monkeypatch, tmp_path)
 
@@ -271,7 +274,7 @@ def test_critique_stage_does_not_flag_segment_within_budget(tmp_path, monkeypatc
     monkeypatch.setattr(
         critique_module,
         "_generate_critique",
-        lambda client, model, system_prompt, user_prompt: Critique(flags=[]),
+        lambda client, model, system_prompt, user_prompt: (Critique(flags=[]), _FIXTURE_USAGE),
     )
     _patch_episode_dir(monkeypatch, tmp_path)
 
@@ -306,7 +309,7 @@ def test_critique_stage_uses_stronger_model(tmp_path, monkeypatch):
     monkeypatch.setattr(
         critique_module,
         "_generate_critique",
-        lambda client, model, system_prompt, user_prompt: Critique(flags=[]),
+        lambda client, model, system_prompt, user_prompt: (Critique(flags=[]), _FIXTURE_USAGE),
     )
     _patch_episode_dir(monkeypatch, tmp_path)
 
@@ -333,7 +336,7 @@ def test_critique_stage_retries_once_then_succeeds_after_bad_grounding(tmp_path,
 
     def fake_generate_critique(client, model, system_prompt, user_prompt):
         prompts.append(user_prompt)
-        return Critique(flags=[])
+        return Critique(flags=[]), _FIXTURE_USAGE
 
     def fake_validate_source_ids(script, known_ids):
         validate_calls["n"] += 1
@@ -350,6 +353,8 @@ def test_critique_stage_retries_once_then_succeeds_after_bad_grounding(tmp_path,
     assert len(prompts) == 2
     assert validate_calls["n"] == 2
     assert "unknown-id-xyz" in prompts[1]  # the validation error, fed back verbatim
+    # both the rejected first attempt and the retry are billed calls
+    assert output.usage == [_FIXTURE_USAGE, _FIXTURE_USAGE]
 
 
 def test_critique_stage_raises_after_a_second_failed_validation(tmp_path, monkeypatch):
@@ -363,7 +368,7 @@ def test_critique_stage_raises_after_a_second_failed_validation(tmp_path, monkey
 
     def fake_generate_critique(client, model, system_prompt, user_prompt):
         prompts.append(user_prompt)
-        return Critique(flags=[])
+        return Critique(flags=[]), _FIXTURE_USAGE
 
     def always_fails(script, known_ids):
         raise ValueError("still ungrounded")
@@ -425,7 +430,7 @@ def test_critique_stage_flags_repeated_correct(tmp_path, monkeypatch):
 
     def fake_generate_critique(client, model, system_prompt, user_prompt):
         captured_prompt["system"] = system_prompt
-        return Critique(flags=[])
+        return Critique(flags=[]), _FIXTURE_USAGE
 
     monkeypatch.setattr(critique_module, "_generate_critique", fake_generate_critique)
     _patch_episode_dir(monkeypatch, tmp_path)
@@ -505,7 +510,7 @@ def test_critique_stage_reports_terse_hosts(tmp_path, monkeypatch):
     monkeypatch.setattr(
         critique_module,
         "_generate_critique",
-        lambda client, model, system_prompt, user_prompt: Critique(flags=[]),
+        lambda client, model, system_prompt, user_prompt: (Critique(flags=[]), _FIXTURE_USAGE),
     )
     _patch_episode_dir(monkeypatch, tmp_path)
 

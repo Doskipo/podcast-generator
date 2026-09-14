@@ -27,8 +27,11 @@ from podcast.models import (
     Script,
     Segment,
     Style,
+    TokenUsage,
 )
 from podcast.stages import script as script_module
+
+_FIXTURE_USAGE = TokenUsage(model="m", prompt_tokens=10, completion_tokens=5)
 
 
 def _host(name: str) -> Host:
@@ -129,7 +132,7 @@ def test_script_stage_persists_and_matches_model(tmp_path, monkeypatch):
     monkeypatch.setattr(
         script_module,
         "_generate_script",
-        lambda client, model, system_prompt, user_prompt: fixture_script,
+        lambda client, model, system_prompt, user_prompt: (fixture_script, _FIXTURE_USAGE),
     )
     _patch_episode_dir(monkeypatch, tmp_path)
 
@@ -155,7 +158,7 @@ def test_script_stage_rejects_unknown_source_ids(tmp_path, monkeypatch):
     monkeypatch.setattr(
         script_module,
         "_generate_script",
-        lambda client, model, system_prompt, user_prompt: fixture_script,
+        lambda client, model, system_prompt, user_prompt: (fixture_script, _FIXTURE_USAGE),
     )
     _patch_episode_dir(monkeypatch, tmp_path)
 
@@ -176,7 +179,8 @@ def test_script_stage_retries_once_then_succeeds_after_bad_source_ids(tmp_path, 
 
     def fake_generate_script(client, model, system_prompt, user_prompt):
         prompts.append(user_prompt)
-        return bad_script if len(prompts) == 1 else good_script
+        script = bad_script if len(prompts) == 1 else good_script
+        return script, _FIXTURE_USAGE
 
     monkeypatch.setattr(script_module, "_generate_script", fake_generate_script)
     _patch_episode_dir(monkeypatch, tmp_path)
@@ -186,6 +190,8 @@ def test_script_stage_retries_once_then_succeeds_after_bad_source_ids(tmp_path, 
     assert output.script.segments[0].source_ids == ["abcd1234"]
     assert len(prompts) == 2
     assert "unknown99" in prompts[1]  # the validation error, fed back verbatim
+    # both the rejected first attempt and the retry are billed calls
+    assert output.usage == [_FIXTURE_USAGE, _FIXTURE_USAGE]
 
 
 def test_script_stage_raises_after_a_second_failed_validation(tmp_path, monkeypatch):
@@ -199,7 +205,7 @@ def test_script_stage_raises_after_a_second_failed_validation(tmp_path, monkeypa
 
     def fake_generate_script(client, model, system_prompt, user_prompt):
         prompts.append(user_prompt)
-        return always_bad
+        return always_bad, _FIXTURE_USAGE
 
     monkeypatch.setattr(script_module, "_generate_script", fake_generate_script)
     _patch_episode_dir(monkeypatch, tmp_path)

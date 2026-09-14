@@ -30,6 +30,7 @@ from podcast.models import (
     RankedArticle,
     RankOutput,
     ScoreBatch,
+    TokenUsage,
 )
 from podcast.paths import episode_dir
 
@@ -81,7 +82,7 @@ def _render_candidate(article: Article) -> str:
 
 def _score_batch(
     client: OpenAI, model: str, interest_topic: str | None, interest_description: str | None, batch: list[Article]
-) -> ScoreBatch:
+) -> tuple[ScoreBatch, TokenUsage]:
     """Boundary around the OpenAI call — the seam tests monkeypatch. Every
     article in `batch` belongs to the same interest; a call never mixes
     interests (see docs/decisions.md)."""
@@ -120,7 +121,10 @@ def _score_batch(
         ],
         response_format=ScoreBatch,
     )
-    return completion.choices[0].message.parsed
+    usage = TokenUsage(
+        model=model, prompt_tokens=completion.usage.prompt_tokens, completion_tokens=completion.usage.completion_tokens
+    )
+    return completion.choices[0].message.parsed, usage
 
 
 def _chunks(items: list, size: int) -> list[list]:
@@ -129,20 +133,24 @@ def _chunks(items: list, size: int) -> list[list]:
 
 def _score_batch_with_validation(
     client: OpenAI, model: str, interest_topic: str | None, description: str | None, batch: list[Article]
-) -> dict[str, ArticleScore]:
+) -> tuple[dict[str, ArticleScore], list[TokenUsage]]:
     """Score `batch` (all one interest), rejecting and re-scoring any item
     whose echoed `interest` doesn't match what it was actually scored
     against. An item that still mismatches after MAX_SCORE_ATTEMPTS gets a
-    defensive fallback rather than a silently wrong score."""
+    defensive fallback rather than a silently wrong score. Returns every
+    call's token usage alongside the scores — a rescore attempt is a real,
+    billed API call and must be counted too."""
     expected_label = interest_topic or "general"
     known_ids = {a.source_id for a in batch}
     results: dict[str, ArticleScore] = {}
+    usage: list[TokenUsage] = []
     remaining = batch
 
     for _attempt in range(MAX_SCORE_ATTEMPTS):
         if not remaining:
             break
-        response = _score_batch(client, model, interest_topic, description, remaining)
+        response, call_usage = _score_batch(client, model, interest_topic, description, remaining)
+        usage.append(call_usage)
         mismatched_ids: set[str] = set()
         for score in response.scores:
             if score.source_id not in known_ids:
@@ -169,17 +177,18 @@ def _score_batch_with_validation(
             source_id=article.source_id, interest=expected_label, score=0.0, reason="interest echo mismatch"
         )
 
-    return results
+    return results, usage
 
 
 def _score_articles(
     client: OpenAI, model: str, articles: list[Article], descriptions: dict[str, str | None]
-) -> dict[str, ArticleScore]:
+) -> tuple[dict[str, ArticleScore], list[TokenUsage]]:
     """Score every article, batched per interest (a batch never mixes
     interests) and chunked to BATCH_SIZE within each interest. Any id the
     model doesn't return a score for at all — after echo-validated retries —
     gets a defensive 0.0/"not scored" entry rather than crashing the stage."""
     scores: dict[str, ArticleScore] = {}
+    usage: list[TokenUsage] = []
 
     by_interest: dict[str | None, list[Article]] = {}
     for article in articles:
@@ -188,7 +197,9 @@ def _score_articles(
     for interest_topic, interest_articles in by_interest.items():
         description = descriptions.get(interest_topic)
         for batch in _chunks(interest_articles, BATCH_SIZE):
-            scores.update(_score_batch_with_validation(client, model, interest_topic, description, batch))
+            batch_scores, batch_usage = _score_batch_with_validation(client, model, interest_topic, description, batch)
+            scores.update(batch_scores)
+            usage.extend(batch_usage)
 
     for article in articles:
         if article.source_id not in scores:
@@ -197,7 +208,7 @@ def _score_articles(
                 source_id=article.source_id, interest=article.interest or "general", score=0.0, reason="not scored"
             )
 
-    return scores
+    return scores, usage
 
 
 def _total_budget(duration_minutes: int) -> int:
@@ -329,7 +340,7 @@ def rank_stage(episode: Episode, fetch_output: FetchOutput, client: OpenAI | Non
     total_budget = _total_budget(profile.podcast.duration_minutes)
 
     descriptions = {interest.topic: interest.description for interest in profile.interests}
-    scores = _score_articles(client, profile.llm.model, articles, descriptions)
+    scores, usage = _score_articles(client, profile.llm.model, articles, descriptions)
 
     has_extra = any(a.interest is None for a in articles)
     weights = _bucket_weights(profile.interests, has_extra)
@@ -364,6 +375,7 @@ def rank_stage(episode: Episode, fetch_output: FetchOutput, client: OpenAI | Non
         backfilled=total_backfilled,
         scored=scored,
         selected=selected,
+        usage=usage,
     )
 
     out_path = episode_dir(episode.episode_id) / "ranked.json"

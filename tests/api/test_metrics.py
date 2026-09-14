@@ -83,6 +83,15 @@ def test_metrics_summary_aggregates_done_and_failed_episodes(tmp_path, monkeypat
     assert body["total_cost_estimate_usd"] == 0.18
     assert body["avg_duration_s"] == 10.0
 
+    # extended fields are present and reflect the same two rows
+    assert body["no_content"] == 0
+    assert {s["status"]: s["count"] for s in body["episodes_by_status"]} == {"done": 1, "failed": 1}
+    assert body["has_mocked_data"] is False
+    assert len(body["daily_series"]) == 30
+    failed_row = next(f for f in body["recent_failures"] if f["episode_id"] == "ep-failed")
+    assert failed_row["status"] == "failed"
+    assert failed_row["mocked"] is False
+
 
 def test_metrics_summary_with_no_episodes(tmp_path, monkeypatch):
     _configure_test_db(monkeypatch, tmp_path)
@@ -96,3 +105,10 @@ def test_metrics_summary_with_no_episodes(tmp_path, monkeypatch):
     assert body["total_episodes"] == 0
     assert body["total_characters"] == 0
     assert body["avg_duration_s"] is None
+    assert body["episodes_by_status"] == []
+    assert body["cost_by_stage"] == []
+    assert body["avg_cost_per_episode_usd"] is None
+    assert body["completion_rate"] is None
+    assert body["d7_retention"] is None
+    assert body["has_mocked_data"] is False
+    assert len(body["daily_series"]) == 30

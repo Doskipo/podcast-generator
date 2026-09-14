@@ -9,7 +9,7 @@ A Vite + React SPA in `web/`, served by the same FastAPI app as the API
 |--------------|---------------------|--------------|
 | `/settings`  | `src/pages/Settings.jsx` | Edit the profile: podcast name, listener name, duration, tone; interests (topic, weight slider, description + "Suggest" button); hosts (name, persona, voice picker); style sliders/toggles (humour, depth, tangents, banter); schedule (cron field + presets). Save → `PUT /profile`. |
 | `/episodes`  | `src/pages/Episodes.jsx` | List of episodes with status badges. "Generate now" → `POST /episodes`, then polls the list until nothing is `pending`/`running`. Each row expands (lazy-loads `GET /episodes/{id}`) into an audio player streaming `/episodes/{id}/audio`, show notes (source links), and the full script. |
-| `/dashboard` | `src/pages/Dashboard.jsx` | Placeholder — metrics dashboard is tomorrow's work. |
+| `/dashboard` | `src/pages/Dashboard.jsx` | Loads `GET /metrics/summary` (once, on mount — no polling) and renders a KPI row (episodes done/total, completion rate, D7 retention, cost/episode), three recharts charts (episodes & plays per day, cost by stage, topic distribution), and a recent-failures/no_content table. Shows a "mocked demo data" banner when the response's `has_mocked_data` is true — see `uv run podcast seed-metrics` and docs/decisions.md ("Dashboard metrics"). |
 
 `/` renders the same component as `/episodes` (default landing page) —
 `App.jsx` maps both paths to `<Episodes />` rather than issuing a redirect.

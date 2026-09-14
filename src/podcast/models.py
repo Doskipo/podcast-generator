@@ -261,6 +261,21 @@ class InterestSuggestion(BaseModel):
     queries: list[str]
 
 
+class TokenUsage(BaseModel):
+    """One OpenAI `chat.completions.parse` call's token cost, captured at
+    the call boundary (`_score_batch`/`_generate_outline`/`_generate_script`/
+    `_generate_critique`) and persisted onto the stage's own output — this
+    is what `podcast.metrics` reads back to price an episode "from the
+    persisted manifests" (see docs/decisions.md). A stage's `usage` field is
+    a *list*, one entry per actual API call (echo-mismatch rescoring in
+    rank.py, or a one-retry-with-feedback attempt in llm_retry.py both cost
+    real money and must both be counted, not just the first attempt)."""
+
+    model: str
+    prompt_tokens: int
+    completion_tokens: int
+
+
 class ArticleScore(BaseModel):
     """One article's relevance score, from the rank stage's batch scoring
     call (see rank.py:_score_batch). Every batch scores exactly one interest,
@@ -303,6 +318,9 @@ class RankOutput(BaseModel):
     backfilled: int  # selected candidates that weren't in the original per-interest top-k
     scored: list[RankedArticle]  # every candidate that was scored, for audit
     selected: list[Article]  # the chosen subset, text extracted, in global order
+    # Every scoring call's token usage — see TokenUsage. Defaults to [] so a
+    # manifest persisted before this field existed still validates.
+    usage: list[TokenUsage] = Field(default_factory=list)
 
 
 class Angle(BaseModel):
@@ -358,6 +376,7 @@ class OutlineOutput(BaseModel):
     generated_at: datetime
     model: str
     outline: Outline
+    usage: list[TokenUsage] = Field(default_factory=list)
 
 
 class Line(BaseModel):
@@ -400,6 +419,7 @@ class ScriptOutput(BaseModel):
     generated_at: datetime
     model: str
     script: Script
+    usage: list[TokenUsage] = Field(default_factory=list)
 
 
 class CritiqueFlag(BaseModel):
@@ -463,6 +483,7 @@ class CritiqueOutput(BaseModel):
     total_words: int  # word count of revised_script (cold_open + segments + outro)
     over_budget_segments: list[SegmentBudgetFlag]
     terse_hosts: list[HostBrevityFlag]
+    usage: list[TokenUsage] = Field(default_factory=list)
 
 
 class TTSLine(BaseModel):

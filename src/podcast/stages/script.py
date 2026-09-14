@@ -33,6 +33,7 @@ from podcast.models import (
     Script,
     ScriptOutput,
     Style,
+    TokenUsage,
 )
 from podcast.paths import episode_dir
 
@@ -269,7 +270,7 @@ def _build_prompts(profile: Profile, outline: Outline, articles: list[Article]) 
     return system_prompt, user_prompt
 
 
-def _generate_script(client: OpenAI, model: str, system_prompt: str, user_prompt: str) -> Script:
+def _generate_script(client: OpenAI, model: str, system_prompt: str, user_prompt: str) -> tuple[Script, TokenUsage]:
     """Boundary around the OpenAI call — the seam tests monkeypatch."""
     completion = client.chat.completions.parse(
         model=model,
@@ -279,7 +280,10 @@ def _generate_script(client: OpenAI, model: str, system_prompt: str, user_prompt
         ],
         response_format=Script,
     )
-    return completion.choices[0].message.parsed
+    usage = TokenUsage(
+        model=model, prompt_tokens=completion.usage.prompt_tokens, completion_tokens=completion.usage.completion_tokens
+    )
+    return completion.choices[0].message.parsed, usage
 
 
 def script_stage(
@@ -293,8 +297,15 @@ def script_stage(
 
     system_prompt, user_prompt = _build_prompts(profile, outline_output.outline, articles)
 
+    # See outline.py's outline_stage for why this is a local accumulator
+    # rather than a tuple threaded through generate_with_retry: a rejected
+    # first attempt still cost real tokens.
+    usage: list[TokenUsage] = []
+
     def generate(prompt: str) -> Script:
-        return _generate_script(client, profile.llm.script_model, system_prompt, prompt)
+        script, call_usage = _generate_script(client, profile.llm.script_model, system_prompt, prompt)
+        usage.append(call_usage)
+        return script
 
     def validate(script: Script) -> None:
         validate_source_ids(script, known_ids)
@@ -306,6 +317,7 @@ def script_stage(
         generated_at=datetime.now(timezone.utc),
         model=profile.llm.script_model,
         script=script,
+        usage=usage,
     )
 
     out_path = episode_dir(episode.episode_id) / "script.json"

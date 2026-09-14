@@ -18,7 +18,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from podcast import db, service
+from podcast import db, seed_metrics, service
 from podcast.artefacts import load_episode_manifest, load_outline_output, load_rank_output
 from podcast.models import CritiqueOutput, FetchOutput, OutlineOutput, Profile, RankOutput, ScriptOutput
 from podcast.stages.fetch import ensure_interest_queries
@@ -153,6 +153,33 @@ def import_profile() -> None:
     print(f"imported profile {row.name!r} from {args.path} into the DB")
 
 
+def seed_metrics_cli() -> None:
+    """`uv run podcast seed-metrics` — writes mocked usage data (episodes,
+    plays, completions, retention) into the DB so /dashboard has something
+    to show on a fresh install. See podcast.seed_metrics for the modeling
+    and docs/decisions.md ("Dashboard metrics") for why it's mocked this
+    way. Real events are never mocked — this is the only writer of
+    mocked=True rows anywhere in the codebase."""
+    parser = argparse.ArgumentParser(
+        prog="podcast seed-metrics", description="Seed mocked-but-plausible usage data for the dashboard"
+    )
+    parser.add_argument("--users", type=int, default=40, help="simulated listener count")
+    parser.add_argument("--days", type=int, default=90, help="how many days back the mocked window covers")
+    parser.add_argument("--seed", type=int, default=42, help="RNG seed — same inputs reproduce the same data")
+    parser.add_argument("--force", action="store_true", help="delete previously seeded mocked rows first (never touches real data)")
+    args = parser.parse_args(sys.argv[2:])
+
+    load_dotenv()
+    db.init_db()
+    with db.session_scope() as session:
+        summary = seed_metrics.seed(session, users=args.users, days=args.days, random_seed=args.seed, force=args.force)
+    print(
+        f"seeded {summary['episodes']} mocked episode(s), {summary['events']} event(s) "
+        f"({summary['plays']} plays, {summary['completions']} completions) across {summary['users']} "
+        f"simulated listener(s) over {summary['window_start']}..{summary['window_end']}"
+    )
+
+
 def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "serve":
         serve()
@@ -160,6 +187,10 @@ def main() -> None:
 
     if len(sys.argv) > 1 and sys.argv[1] == "import-profile":
         import_profile()
+        return
+
+    if len(sys.argv) > 1 and sys.argv[1] == "seed-metrics":
+        seed_metrics_cli()
         return
 
     load_dotenv()

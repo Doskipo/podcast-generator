@@ -1118,6 +1118,97 @@ feedback; a second failure propagates unchanged, exactly as before this existed.
 
 
 
+## Dashboard metrics: extended GET /metrics/summary, seed-metrics, /dashboard — 2026-09-14
+Extended the existing `GET /metrics/summary` (episode counts, ElevenLabs cost/characters only)
+into the full dashboard payload, added `podcast seed-metrics` (mocked-but-plausible usage data
+so the dashboard isn't empty on a fresh DB), and built the actual `/dashboard` React page
+(recharts) against it.
+
+- **Which metrics, and why (product framing).** KPI row: **episodes done/total** (is the
+  pipeline/scheduler actually producing content, not just configured to); **completion rate**
+  (plays vs. finished plays — separates "nobody's listening" from "people start and bail," a
+  script-quality signal, not a generation-pipeline one); **D7 retention** (the clearest signal a
+  personal podcast has earned a place in someone's routine vs. being tried once); **cost/episode**
+  (the number that decides whether this scales past a personal project, both providers combined).
+  Charts: **episodes & plays per day** (supply vs. demand — episodes with no plays is a discovery/
+  distribution problem); **cost by stage** (confirms the deliberate expensive-model trade-off on
+  `script`/`critique` — see "Script rebuild" — is actually where the money goes, not silently
+  ballooning elsewhere); **topic distribution** (which interests get real airtime — distinct from
+  `no_content_interests`, which tracks the opposite: zero candidates); **recent failures/no_content**
+  (the exact stage + reason each broken run stopped at, to separate "the feed was empty this week"
+  from "the API key expired").
+- **OpenAI token usage wasn't tracked anywhere before this** — only ElevenLabs characters were
+  (`TTSOutput.total_characters`). "Cost per episode... from the persisted manifests" needed
+  `completion.usage` captured at each `chat.completions.parse(...)` boundary (rank/outline/script/
+  critique) and persisted onto that stage's own existing manifest as a new `usage: list[TokenUsage]`
+  field (a list, not one value — a rejected-then-retried attempt in `llm_retry.generate_with_retry`,
+  or a rescored echo-mismatch batch in `rank.py`, both cost real, billed tokens and both are counted,
+  not just the attempt that ultimately validated). This is the one place this change touches pipeline
+  internals rather than just the API/frontend layer, and it broke the return contract every stage
+  test monkeypatches directly (`_score_batch`, `_generate_outline`, `_generate_script`,
+  `_generate_critique` now return `(domain_object, TokenUsage)`) — all four stage test files updated
+  accordingly. Fetch's own two LLM calls (`_generate_queries`, `_generate_suggestion`) are
+  deliberately out of scope: one-off/cached-to-YAML or settings-UI calls, not part of any per-episode
+  manifest.
+- **Illustrative OpenAI pricing table** (`podcast.metrics.OPENAI_PRICING_PER_1K_TOKENS`), same
+  "not a real bill" caveat as the pre-existing `service.COST_PER_1K_CHARS_USD` — rough list-price
+  order of magnitude for `gpt-4o-mini`/`gpt-4o`, a flat fallback for any other model string a
+  profile might set.
+- **Cost is computed from persisted manifests at request time, not cached in the DB.** Matches the
+  task's explicit ask ("from the persisted manifests") and this app's existing philosophy (every
+  stage's output is the source of truth on disk). Re-reads every episode's manifest files on every
+  `GET /metrics/summary` call — a real scale tradeoff, fine at this app's size (a personal, single-
+  profile, dozens-to-hundreds-of-episodes app), revisit (cache onto `EpisodeRecord` at `_finish`
+  time) if this endpoint is ever called often against a much larger episode history.
+- **Mocked data is DB-only, not fabricated manifest files.** A mocked `EpisodeRecord` has no
+  `data/episodes/<id>/` directory at all — its cost/topic breakdown lives directly on two new JSON
+  columns (`mock_cost_by_stage`, `mock_topic_counts`) instead. Considered writing full fake
+  rank.json/outline.json/etc. per mocked episode so one code path (`podcast.metrics.
+  episode_cost_breakdown`) would serve real and mocked episodes identically with zero branching —
+  rejected: meant fabricating plausible fake articles/scripts at volume (up to ~90 episodes) for no
+  benefit the dashboard actually needs (it never renders a mocked episode's script/show notes), and
+  blurred "every stage persists its output" into also meaning "...even a stage that never ran."
+  `episode_cost_breakdown`/topic tallying just branch once on `record.mocked` instead.
+- **`events`/`episodes` both gained a `mocked: bool` column** (additive migration, following the
+  existing `_migrate_add_missing_columns` pattern — generalized it from one hardcoded column to a
+  small `(table, column, sql_type)` list, since it now needs four). `podcast/seed_metrics.py` writes
+  every mocked row directly via `db.EpisodeRecord`/`db.EventRecord`, never through
+  `service.run_episode`/`service.emit_event` — "real events are never mocked" holds structurally
+  (there's exactly one writer of `mocked=True` rows in the whole codebase), not just by convention.
+  `service.py` itself needed zero changes for this feature.
+- **The mocked window is `[today - days, today - 1]` — strictly before today.** So mocked and real
+  data never land on the same calendar day, which makes each `DailyPoint.mocked` flag unambiguous
+  (a day is either fully real or fully mocked, in practice) with no need to merge/flag at the
+  individual-row level within a day.
+- **40 "users" are synthetic `user_id` strings in event metadata, not a real users table** — this
+  is a single-profile app with no listener-identity concept today, and a real per-user schema is out
+  of scope for a demo-data seeder. Each gets a staggered join day and a decaying return probability
+  (~90% day-of-join, tapering toward a ~10% floor) tuned so aggregate D7 retention lands in a
+  plausible ~30-45% range. Consequence: **D7 retention and per-user metrics are `None`/absent until
+  either mocked data exists or a real per-listener identity is built** — real `played`/
+  `completed_playback` events carry no `user_id` today (`EventIn` doesn't ask for one), so
+  `podcast.metrics._d7_retention` has nothing to compute from until then. Raw play/completion
+  *counts* and completion *rate* don't need user identity and do reflect real events immediately.
+- **`--force` on `seed-metrics` only ever deletes rows it previously marked `mocked=True`** — never
+  files/directories, and never a row it didn't write itself — per CLAUDE.md's "data/ is never
+  deleted." A reseed with the same `(users, days, seed)` is byte-for-byte reproducible (verified in
+  `tests/test_seed_metrics.py`).
+- **Dashboard**: recharts (as directed), colors from the dataviz skill's validated default
+  categorical palette used verbatim (no brand substitution needed — this app has no existing chart
+  palette to match). Provider identity is fixed everywhere it appears: OpenAI is always the palette's
+  slot-1 blue, ElevenLabs always slot-2 orange. Chart entrance animations are disabled
+  (`isAnimationActive={false}`) — a monitoring dashboard should show its numbers immediately, not
+  animate them in; also sidesteps a real headless-screenshot artifact hit while verifying this (bars/
+  lines invisible mid-animation).
+- **`GET /metrics/summary`'s original fields are byte-for-byte unchanged** (`total_episodes`, `done`,
+  `failed`, `total_characters`, `total_cost_estimate_usd` — ElevenLabs-only, unchanged semantics —
+  `avg_duration_s`); the extended fields are new, additive keys on the same response, computed in a
+  new `podcast/metrics.py` (pure, no FastAPI/pydantic dependency, unit-tested directly in
+  `tests/test_metrics_aggregation.py` — named `_aggregation` rather than `test_metrics.py` only to
+  avoid a same-basename collision with the pre-existing `tests/api/test_metrics.py` under pytest's
+  default rootdir-relative import mode) rather than folded into the existing route handler's own
+  queries.
+
 ## Future work.
 - Add **suggest topics from previous episodes** from the previous podcasts. So it generatos a topic 
 (or a bunch of topics) for a podcast for you.
