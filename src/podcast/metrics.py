@@ -14,12 +14,23 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 from sqlmodel import Session, select
 
 from podcast import db, paths
-from podcast.models import CritiqueOutput, OutlineOutput, PerformOutput, RankOutput, ScriptOutput, TokenUsage, TTSOutput
+from podcast.models import (
+    CritiqueOutput,
+    OutlineOutput,
+    PerformOutput,
+    RankOutput,
+    ScriptOutput,
+    StitchOutput,
+    TokenUsage,
+    TTSOutput,
+)
 from podcast.service import COST_PER_1K_CHARS_USD
+from podcast.stages.perform import flatten_performed_lines
 
 DAILY_SERIES_DAYS = 30
 RECENT_FAILURES_LIMIT = 10
@@ -58,6 +69,64 @@ def estimate_openai_cost_usd(usage: list[TokenUsage]) -> float:
 
 def estimate_elevenlabs_cost_usd(characters: int) -> float:
     return characters / 1000 * COST_PER_1K_CHARS_USD
+
+
+@dataclass
+class WpmMeasurement:
+    words_per_minute: float
+    episode_count: int
+    total_words: int
+    total_minutes: float
+
+
+def measured_words_per_minute(episodes_dir: Path | None = None) -> WpmMeasurement | None:
+    """The effective spoken words-per-minute across every completed episode
+    on disk — words in performance.json (the text actually sent to
+    synthesis) over stitch_manifest.json's measured audio duration. An
+    episode only counts if it has BOTH files: a real, fully-synthesized
+    episode, not a partial/in-progress run. Aggregated as
+    total_words / total_minutes across every qualifying episode (not an
+    average of per-episode rates), so longer episodes weigh proportionally
+    more. Returns None if no qualifying episode exists yet.
+
+    Not called automatically anywhere in the pipeline — used once, by hand,
+    to set LLMSettings.words_per_minute's default; re-run as more real
+    episodes accumulate. See docs/decisions.md ("Measured words-per-minute")."""
+    base = episodes_dir or paths.EPISODES_DIR
+    if not base.is_dir():
+        return None
+
+    total_words = 0
+    total_minutes = 0.0
+    episode_count = 0
+
+    for episode_dir in sorted(base.iterdir()):
+        perform_path = episode_dir / "performance.json"
+        stitch_path = episode_dir / "stitch_manifest.json"
+        if not (perform_path.is_file() and stitch_path.is_file()):
+            continue
+
+        perform_output = PerformOutput.model_validate_json(perform_path.read_text(encoding="utf-8"))
+        stitch_output = StitchOutput.model_validate_json(stitch_path.read_text(encoding="utf-8"))
+
+        minutes = stitch_output.duration_ms / 1000 / 60
+        if minutes <= 0:
+            continue
+
+        words = sum(len(line.text.split()) for line in flatten_performed_lines(perform_output.performance))
+        total_words += words
+        total_minutes += minutes
+        episode_count += 1
+
+    if episode_count == 0:
+        return None
+
+    return WpmMeasurement(
+        words_per_minute=total_words / total_minutes,
+        episode_count=episode_count,
+        total_words=total_words,
+        total_minutes=round(total_minutes, 3),
+    )
 
 
 @dataclass

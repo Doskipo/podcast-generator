@@ -110,7 +110,7 @@ def _valid_performance(extra_cold_open: bool = True) -> Performance:
     suffix-aligned with the original's single identification line."""
     cold_open = []
     if extra_cold_open:
-        cold_open.append(PerformedLine(speaker="Nova", text="Hey, welcome back.", delivery="warm"))
+        cold_open.append(PerformedLine(speaker="Nova", text="Hey.", delivery="warm"))
     cold_open.append(PerformedLine(speaker="Nova", text="This is Test Podcast... with Nova and Max.", delivery="settles in"))
     return Performance(
         title="Test Episode",
@@ -267,6 +267,71 @@ def test_perform_stage_rejects_unknown_speaker(tmp_path, monkeypatch):
         perform_module.perform_stage(episode, critique_output, articles, client=object())
 
 
+def test_perform_stage_rejects_performance_over_word_cap(tmp_path, monkeypatch):
+    profile = _profile()
+    episode = _episode(profile)
+    articles = [_article("abcd1234")]
+    critique_output = _critique_output(episode.episode_id, "abcd1234")
+
+    bad_performance = _valid_performance(extra_cold_open=False)
+    # pad one line's text far past the +10% word cap, structure untouched
+    bad_performance.segments[0].lines[0] = PerformedLine(speaker="Nova", text="So get THIS — " + "padding " * 20)
+
+    _patch_generation(monkeypatch, bad_performance)
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    with pytest.raises(ValueError, match="word cap"):
+        perform_module.perform_stage(episode, critique_output, articles, client=object())
+
+
+def test_perform_stage_retries_when_over_word_cap_then_succeeds(tmp_path, monkeypatch):
+    profile = _profile()
+    episode = _episode(profile)
+    articles = [_article("abcd1234")]
+    critique_output = _critique_output(episode.episode_id, "abcd1234")
+
+    bloated_performance = _valid_performance(extra_cold_open=False)
+    bloated_performance.segments[0].lines[0] = PerformedLine(speaker="Nova", text="So get THIS — " + "padding " * 20)
+    trimmed_performance = _valid_performance(extra_cold_open=False)
+
+    attempts = {"n": 0}
+    prompts: list[str] = []
+
+    def fake_generate_performance(client, model, system_prompt, user_prompt):
+        prompts.append(user_prompt)
+        attempts["n"] += 1
+        return (bloated_performance if attempts["n"] == 1 else trimmed_performance), _FIXTURE_USAGE
+
+    def fake_generate_fact_check(client, model, system_prompt, user_prompt):
+        return [], _FIXTURE_USAGE
+
+    monkeypatch.setattr(perform_module, "_generate_performance", fake_generate_performance)
+    monkeypatch.setattr(perform_module, "_generate_fact_check", fake_generate_fact_check)
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    output = perform_module.perform_stage(episode, critique_output, articles, client=object())
+
+    assert len(prompts) == 2
+    assert "word cap" in prompts[1]  # the validation error, fed back verbatim
+    assert output.performance.segments[0].lines[0].text == "So get THIS —"
+
+
+def test_validate_word_cap_rejects_over_10_percent_overrun():
+    original = _original_script("abcd1234")
+    performance = _valid_performance(extra_cold_open=False)
+    performance.segments[0].lines[0] = PerformedLine(speaker="Nova", text="So get THIS — " + "padding " * 20)
+
+    with pytest.raises(ValueError, match="word cap"):
+        perform_module._validate_word_cap(performance, original)
+
+
+def test_validate_word_cap_accepts_within_10_percent():
+    original = _original_script("abcd1234")
+    performance = _valid_performance(extra_cold_open=False)
+
+    perform_module._validate_word_cap(performance, original)  # does not raise
+
+
 def test_perform_stage_retries_once_then_succeeds(tmp_path, monkeypatch):
     profile = _profile()
     episode = _episode(profile)
@@ -374,7 +439,7 @@ def test_flatten_performed_lines_order():
     performance = _valid_performance(extra_cold_open=True)
     flat = perform_module.flatten_performed_lines(performance)
     assert [line.text for line in flat] == [
-        "Hey, welcome back.",
+        "Hey.",
         "This is Test Podcast... with Nova and Max.",
         "So get THIS —",
         "Tell me more.",
@@ -387,7 +452,7 @@ def test_render_fact_check_pairs_excludes_new_cold_open_lines():
     performance = _valid_performance(extra_cold_open=True)
     pairs_block = perform_module._render_fact_check_pairs(performance, original)
 
-    assert "Hey, welcome back." not in pairs_block  # the new chit-chat line has no original counterpart
+    assert "Hey." not in pairs_block  # the new chit-chat line has no original counterpart
     assert "This is Test Podcast... with Nova and Max." in pairs_block
     assert "Here is the story." in pairs_block
 

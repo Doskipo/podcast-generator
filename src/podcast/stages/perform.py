@@ -44,6 +44,13 @@ from podcast.stages.script import flatten_lines
 
 logger = logging.getLogger(__name__)
 
+# Performance rewriting (flow punctuation, spoken lists, cold-open
+# chit-chat) may lengthen the script somewhat, but must not turn into
+# padding — the total word count (across cold_open + segments + outro) may
+# exceed the critique script's own word count by at most this fraction. See
+# docs/decisions.md ("Measured words-per-minute").
+MAX_WORD_OVERRUN = 0.10
+
 
 def flatten_performed_lines(performance: Performance) -> list[PerformedLine]:
     """Cold open, then every segment's lines in order, then the outro — the
@@ -64,6 +71,8 @@ def _build_performance_prompts(profile: Profile, script: Script) -> tuple[str, s
     hosts = profile.podcast.hosts
     host_names = ", ".join(h.name for h in hosts)
     cold_open_speakers = [line.speaker for line in script.cold_open]
+    original_words = sum(len(line.text.split()) for line in flatten_lines(script))
+    max_words = int(original_words * (1 + MAX_WORD_OVERRUN))
 
     system_prompt = (
         "You are a vocal performance director for a two-host podcast. You are handed a "
@@ -103,6 +112,10 @@ def _build_performance_prompts(profile: Profile, script: Script) -> tuple[str, s
         f"- Only use these speakers: {host_names}.\n"
         "- Never change a fact, number, name, or claim — this is a performance rewrite, not a "
         "content rewrite. If you wouldn't say it changes what the line means, it's fine.\n"
+        f"- The original script below is {original_words} words. Your performed version — "
+        f"including any cold-open chit-chat you add — must not exceed {max_words} words "
+        f"({int(MAX_WORD_OVERRUN * 100)}% over the original). Rewriting for flow should not mean "
+        "padding it out.\n"
     )
     user_prompt = "Numbered script (index: speaker: text):\n\n" + _render_script_for_performance(script)
     return system_prompt, user_prompt
@@ -177,10 +190,25 @@ def _validate_speakers(performance: Performance, known_speakers: set[str]) -> No
         raise ValueError(f"performance uses unknown speaker(s) {sorted(unknown)}; known hosts are {sorted(known_speakers)}")
 
 
+def _validate_word_cap(performance: Performance, original: Script) -> None:
+    """The performed script's total word count (cold_open + segments +
+    outro, including any added chit-chat) may not exceed the original's by
+    more than MAX_WORD_OVERRUN — rewriting for flow is not license to pad."""
+    original_words = sum(len(line.text.split()) for line in flatten_lines(original))
+    performed_words = sum(len(line.text.split()) for line in flatten_performed_lines(performance))
+    max_words = int(original_words * (1 + MAX_WORD_OVERRUN))
+    if performed_words > max_words:
+        raise ValueError(
+            f"performance is {performed_words} words, over the {max_words}-word cap "
+            f"({int(MAX_WORD_OVERRUN * 100)}% over the original script's {original_words} words) — trim it"
+        )
+
+
 def _validate_performance(performance: Performance, original: Script, known_speakers: set[str]) -> None:
     _validate_segment_structure(performance, original)
     _validate_cold_open_suffix(performance, original)
     _validate_speakers(performance, known_speakers)
+    _validate_word_cap(performance, original)
 
 
 def _apply_grounding(performance: Performance, original: Script) -> Performance:

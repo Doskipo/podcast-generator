@@ -194,7 +194,7 @@ def _tag_density_instruction(tags_supported: bool) -> str:
 def _build_prompts(profile: Profile, outline: Outline, articles: list[Article]) -> tuple[str, str]:
     podcast = profile.podcast
     host_a, host_b = podcast.hosts[0], podcast.hosts[1]
-    target_words = podcast.duration_minutes * 150
+    target_words = round(podcast.duration_minutes * profile.llm.words_per_minute)
     known_ids = ", ".join(a.source_id for a in articles)
     recurring_bits_by_id = {bit.effective_id: bit for bit in podcast.recurring_bits}
     tags_supported = supports_audio_tags(profile.tts.model_id) or supports_audio_tags(profile.tts.dialogue_model_id)

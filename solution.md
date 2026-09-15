@@ -7,22 +7,21 @@ diving into that log or the code.
 
 ## What it does
 
-Given a profile of interests (topics, weights, optional curated feeds, per-interest search
-queries), the app fetches recent news/papers, ranks and budgets them per interest, plans an
+Given a profile of interests (topics, weights, per-interest search queries), the app fetches recent news/papers, ranks and budgets them per interest, plans an
 episode outline, writes a two-host dialogue script grounded in the fetched sources, reviews and
 rewrites it for correctness and naturalness, rewrites it again for how it should sound spoken, and
-synthesizes it with ElevenLabs into an mp3 — end to end, unattended, on a schedule or on demand.
+synthesizes it with ElevenLabs into an mp3. End to end, unattended, on a schedule or on demand.
 
 ## Architecture
 
 Pipeline: **fetch → rank → outline → script → critique → perform → tts → stitch**
-(`src/podcast/stages/`). Every stage is a pure function — typed Pydantic input in, typed Pydantic
-output out — that persists its own artefact under `data/episodes/<episode_id>/` and never touches
+(`src/podcast/stages/`). Every stage is a pure function, typed Pydantic input in, typed Pydantic
+output out, that persists its own artefact under `data/episodes/<episode_id>/` and never touches
 state a later stage doesn't hand it explicitly. That buys two things directly: any stage can be
 re-run in isolation from its predecessor's artefact (`podcast.generate --from-<stage>`, or `--until
 <stage>` to stop early), and every intermediate decision (which articles were scored and why,
 what the outline's narrative plan was, what critique flagged, what changed between content and
-performance) is inspectable after the fact instead of only living in a model's ephemeral context.
+performance) is inspectable after the fact instead of only living in a model's small context.
 
 `podcast/service.py` is the one place that sequences stages, does DB bookkeeping, and emits events
 — both the CLI (`podcast/generate.py`) and the API (`POST /episodes`, background task) call into
@@ -37,10 +36,10 @@ episode list with playback, and a metrics dashboard.
 every layer that could otherwise drift: `script_stage`/`outline_stage` reject any `source_ids`
 outside the known article pool; `critique_stage` and `perform_stage` re-validate the same
 invariant on every rewrite, and `perform_stage` additionally overwrites each segment's
-`source_ids`/`headline` from the original in code rather than trusting the model's echo — grounding
+`source_ids`/`headline` from the original in code rather than trusting the model's echo: grounding
 is structural, not requested. When rank selects zero articles for every interest, the pipeline
 stops at a distinct `no_content` status rather than letting outline write around an empty source
-list (the one real grounding failure that made it to a live run — see "Three fixes from the first
+list (the one real grounding failure that made it to a live run, see "Three fixes from the first
 real run" in the decision log).
 
 ## Key trade-offs
@@ -81,6 +80,10 @@ real run" in the decision log).
   data (`podcast seed-metrics`) is DB-only (no fake manifest files) and structurally distinct from
   real data (`mocked=True`, never lands on today's date), so the two can never be confused.
 
+
+## Costs and numbers
+- 
+
 ## Known simplifications / out of scope
 
 - No cross-interest redistribution when one interest has fewer candidates than its rank budget.
@@ -98,3 +101,6 @@ real run" in the decision log).
 - Per-content-type source adapters (subreddit RSS, YouTube channel RSS) for topics that live
   outside news-shaped search results (e.g. calisthenics), flagged during the discovery-provider
   comparison as real volume gaps Bing News search alone can't close.
+
+## How I used AI tools
+I basically used Claude Code to built most of the code from prompts; owning the decisions, the personas, the review, and the testing discipline while consulting and planning with Claude Chat. I used sonnet for code and fable for chat.

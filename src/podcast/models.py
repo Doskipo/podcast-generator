@@ -158,6 +158,15 @@ class LLMSettings(BaseModel):
     # matters most and the per-episode call count is low (one call). See
     # docs/decisions.md ("Script rebuild") for the cost trade-off.
     script_model: str = "gpt-4o"
+    # Drives outline_stage's and script_stage's word budgets (duration_minutes
+    # * words_per_minute). Default is a real measurement — see
+    # podcast.metrics.measured_words_per_minute and docs/decisions.md
+    # ("Measured words-per-minute") — of actual spoken pace from performed,
+    # synthesized dialogue-mode audio: below the ~150 wpm this replaced, but
+    # above this project's own ~100-110 prior guess. Based on a single real
+    # completed episode as of this measurement — re-run
+    # measured_words_per_minute() as more real episodes accumulate.
+    words_per_minute: float = 135.8
 
 
 class TTSSettings(BaseModel):

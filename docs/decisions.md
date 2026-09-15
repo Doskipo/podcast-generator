@@ -1402,6 +1402,63 @@ and `solution.md`.
   SPA's HTML (checked for Vite's `<div id="root">` mount point, not just a 200) and `/docs`
   returns FastAPI's Swagger UI. Real, repeatable verification on every future change, not a
   one-off manual check that goes stale.
+- **`sample.mp3` refreshed mid-task.** While writing this entry, noticed the episode this was
+  copied from (`20260914T165224Z-4bec4c`) had been regenerated (script.json/performance.json/
+  tts_manifest.json/episode.mp3 all newer than the copy) — presumably a real run through the new
+  perform stage, done separately from this session. Re-copied so `sample.mp3` reflects the current
+  audio, not a stale pre-perform-stage version.
+
+## Measured words-per-minute — 2026-09-15
+`outline_stage`'s and `script_stage`'s word budgets used a flat, guessed `duration_minutes * 150`
+— never measured against anything the pipeline actually produced. Replaced with
+`LLMSettings.words_per_minute: float`, profile-overridable, defaulting to a real measurement.
+
+- **Measurement: `podcast.metrics.measured_words_per_minute()`.** Scans `data/episodes/*/` for
+  every directory with BOTH `performance.json` and `stitch_manifest.json` — a real, fully
+  synthesized episode, not a partial run — sums `performance.json`'s word count (the text
+  actually sent to ElevenLabs) and `stitch_manifest.json`'s measured audio duration across all of
+  them, and returns `total_words / total_minutes` (aggregated, not an average of per-episode
+  rates, so a longer episode weighs proportionally more). Not called automatically anywhere in
+  the pipeline — a one-time-by-hand measurement to calibrate the default, re-run as more real
+  episodes accumulate. Verified self-consistent before trusting it: the one qualifying episode's
+  `performance.json` per-line character counts matched `tts_manifest.json`'s exactly, and
+  `generated_at` timestamps show a coherent perform → tts → stitch sequence a few minutes apart —
+  real synthesized audio, not stale or mismatched artefacts.
+- **The measured number: 135.8 wpm** (1,607 words / 11.832 minutes, `episode_count=1`). Below the
+  150 wpm this replaces, but above this project's own prior ~100-110 guess — dialogue-mode
+  ElevenLabs synthesis with inter-turn pacing and audio tags apparently runs a bit slower than a
+  flat human-speech-rate assumption, but not as slow as guessed. **Single real data point** — the
+  perform stage only just shipped, so exactly one completed episode has a `performance.json` to
+  measure from. Worth re-running this measurement (and revisiting the default) once several more
+  real episodes exist; noted directly in `LLMSettings.words_per_minute`'s docstring so it isn't
+  mistaken for a settled number.
+- **Why a profile field, not a hardcoded constant.** `words_per_minute` already sits alongside
+  `model`/`script_model` on `LLMSettings` — a profile-level knob, not a pipeline-wide constant —
+  since actual spoken pace is a property of the configured hosts/voices/synthesis mode
+  (dialogue vs. per-line fallback, v3 audio tag density, a specific host's persona-driven
+  delivery), not a universal constant every profile should share. The measured 135.8 is this
+  profile's own real rate; a differently-configured profile (different voices, no audio tags,
+  per-line fallback) would plausibly measure differently.
+- **The +10% perform-stage word cap.** `perform.py:MAX_WORD_OVERRUN = 0.10` — the performed
+  script's total word count (cold_open + segments + outro, including any added cold-open
+  chit-chat) may not exceed the critique script's own word count by more than 10%, checked by
+  `_validate_word_cap` and wired into the existing `_validate_performance`/`generate_with_retry`
+  pipeline (see "Perform stage" entry) — so a violation is flagged and fed back for exactly one
+  retry, the same mechanism every other structural check in that stage already uses, not new
+  machinery. Directly protects the word-budget/wpm chain: `outline_stage` sizes segments from
+  `words_per_minute`, and a performance pass that quietly inflated word count on top of that
+  would silently blow the episode's target duration back out regardless of how well-calibrated
+  the budget was. The cap is also stated to the writing model up front (the original word count
+  and the exact max, in the system prompt) so a violation is the exception, not the common case,
+  not something the retry is expected to catch routinely.
+- **Test fixture fallout.** `tests/test_perform.py`'s `_valid_performance()` "happy path" fixture
+  was, it turned out, already over the new 10% cap once its optional cold-open chit-chat line was
+  included (22 words performed vs. 19 original, cap 20) — shortened that one fixture line
+  ("Hey, welcome back." → "Hey.") to land at exactly the cap boundary; every other test asserting
+  its exact text was updated to match. `tests/test_outline.py`'s word-budget test pinned
+  `profile.llm.words_per_minute = 150` explicitly rather than depending on whatever the measured
+  default happens to be — decouples that test's round-number arithmetic from a value this entry
+  says outright isn't settled yet.
 
 ## Future work.
 - Add **suggest topics from previous episodes** from the previous podcasts. So it generatos a topic 

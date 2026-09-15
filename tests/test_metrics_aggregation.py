@@ -11,7 +11,17 @@ from pathlib import Path
 from sqlmodel import SQLModel, create_engine
 
 from podcast import db, metrics, paths
-from podcast.models import Article, RankedArticle, RankOutput, TokenUsage
+from podcast.models import (
+    Article,
+    Performance,
+    PerformedLine,
+    PerformedSegment,
+    PerformOutput,
+    RankedArticle,
+    RankOutput,
+    StitchOutput,
+    TokenUsage,
+)
 
 
 def _configure_test_db(monkeypatch, tmp_path: Path) -> None:
@@ -53,6 +63,93 @@ def _write_ranked_json(episodes_dir: Path, episode_id: str, selected_interests: 
         usage=usage,
     )
     (d / "ranked.json").write_text(output.model_dump_json(indent=2), encoding="utf-8")
+
+
+def _write_performance_and_stitch(episodes_dir: Path, episode_id: str, word_texts: list[str], duration_ms: int) -> None:
+    """Writes just enough of performance.json + stitch_manifest.json for
+    measured_words_per_minute to read — one segment carrying all of
+    `word_texts` as separate lines, one line per text."""
+    d = episodes_dir / episode_id
+    d.mkdir(parents=True, exist_ok=True)
+    performance = Performance(
+        title="t",
+        cold_open=[],
+        segments=[
+            PerformedSegment(
+                headline="h",
+                source_ids=[],
+                lines=[PerformedLine(speaker="Nova", text=text) for text in word_texts],
+            )
+        ],
+        outro=[],
+    )
+    perform_output = PerformOutput(
+        episode_id=episode_id,
+        generated_at=datetime.now(timezone.utc),
+        model="test-model",
+        fact_check_model="test-model-cheap",
+        performance=performance,
+        fact_flags=[],
+    )
+    (d / "performance.json").write_text(perform_output.model_dump_json(indent=2), encoding="utf-8")
+
+    stitch_output = StitchOutput(
+        episode_id=episode_id, generated_at=datetime.now(timezone.utc), audio_file="episode.mp3", duration_ms=duration_ms
+    )
+    (d / "stitch_manifest.json").write_text(stitch_output.model_dump_json(indent=2), encoding="utf-8")
+
+
+def test_measured_words_per_minute_aggregates_across_episodes(tmp_path, monkeypatch):
+    _patch_episode_dir(monkeypatch, tmp_path)
+    # ep1: 120 words in 60s (1 min) -> 120 wpm alone
+    _write_performance_and_stitch(paths.EPISODES_DIR, "ep1", ["word"] * 120, duration_ms=60_000)
+    # ep2: 60 words in 60s (1 min) -> 60 wpm alone
+    _write_performance_and_stitch(paths.EPISODES_DIR, "ep2", ["word"] * 60, duration_ms=60_000)
+
+    result = metrics.measured_words_per_minute()
+
+    assert result.episode_count == 2
+    assert result.total_words == 180
+    assert result.total_minutes == 2.0
+    # aggregate (weighted by duration), not a simple average of 120 and 60
+    assert result.words_per_minute == 90.0
+
+
+def test_measured_words_per_minute_ignores_episodes_missing_either_file(tmp_path, monkeypatch):
+    _patch_episode_dir(monkeypatch, tmp_path)
+    _write_performance_and_stitch(paths.EPISODES_DIR, "complete", ["word"] * 100, duration_ms=60_000)
+
+    # performance.json only, no stitch_manifest.json — episode never finished synthesis
+    perform_only_dir = paths.EPISODES_DIR / "perform-only"
+    perform_only_dir.mkdir(parents=True, exist_ok=True)
+    performance = Performance(title="t", cold_open=[], segments=[], outro=[])
+    perform_output = PerformOutput(
+        episode_id="perform-only",
+        generated_at=datetime.now(timezone.utc),
+        model="m",
+        fact_check_model="m",
+        performance=performance,
+        fact_flags=[],
+    )
+    (perform_only_dir / "performance.json").write_text(perform_output.model_dump_json(indent=2), encoding="utf-8")
+
+    # stitch_manifest.json only, no performance.json — predates the perform stage
+    stitch_only_dir = paths.EPISODES_DIR / "stitch-only"
+    stitch_only_dir.mkdir(parents=True, exist_ok=True)
+    stitch_output = StitchOutput(
+        episode_id="stitch-only", generated_at=datetime.now(timezone.utc), audio_file="episode.mp3", duration_ms=60_000
+    )
+    (stitch_only_dir / "stitch_manifest.json").write_text(stitch_output.model_dump_json(indent=2), encoding="utf-8")
+
+    result = metrics.measured_words_per_minute()
+
+    assert result.episode_count == 1  # only "complete" qualifies
+    assert result.total_words == 100
+
+
+def test_measured_words_per_minute_returns_none_when_no_qualifying_episode(tmp_path, monkeypatch):
+    _patch_episode_dir(monkeypatch, tmp_path)
+    assert metrics.measured_words_per_minute() is None
 
 
 def test_estimate_openai_cost_uses_known_model_pricing():

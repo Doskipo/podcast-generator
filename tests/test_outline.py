@@ -368,7 +368,8 @@ def test_outline_stage_rejects_a_segment_with_both_bit_and_tangent(tmp_path, mon
 
 def test_outline_stage_allocates_word_budget_proportional_to_score(tmp_path, monkeypatch):
     profile = _profile()
-    profile.podcast.duration_minutes = 10  # total_words = 10*150 - 120 = 1380
+    profile.podcast.duration_minutes = 10
+    profile.llm.words_per_minute = 150  # round number for this test's arithmetic; total_words = 10*150 - 120 = 1380
     episode = _episode(profile)
     articles = [_article("high"), _article("low")]
     rank_output = _rank_output(episode.episode_id, articles)

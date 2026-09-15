@@ -46,8 +46,9 @@ logger = logging.getLogger(__name__)
 ARTICLE_BRIEF_CHARS = 300
 
 # Rough words reserved for the cold open + outro, out of duration_minutes *
-# 150 total — the rest is split across stories as word_budget, proportional
-# to each story's rank score. See docs/decisions.md ("Script quality pass").
+# profile.llm.words_per_minute total — the rest is split across stories as
+# word_budget, proportional to each story's rank score. See
+# docs/decisions.md ("Script quality pass").
 COLD_OPEN_OUTRO_RESERVE_WORDS = 120
 
 
@@ -321,10 +322,11 @@ def outline_stage(episode: Episode, rank_output: RankOutput, client: OpenAI | No
     outline = generate_with_retry(generate, validate, user_prompt, stage_name="outline")
 
     # word_budget is code-computed, not asked of the model — proportional to
-    # each story's rank score, summing to duration_minutes*150 minus a
-    # reserve for the cold open/outro (see docs/decisions.md).
+    # each story's rank score, summing to duration_minutes*words_per_minute
+    # minus a reserve for the cold open/outro (see docs/decisions.md).
     score_by_id = {ra.article.source_id: ra.score for ra in rank_output.scored}
-    total_words = max(0, profile.podcast.duration_minutes * 150 - COLD_OPEN_OUTRO_RESERVE_WORDS)
+    target_words = round(profile.podcast.duration_minutes * profile.llm.words_per_minute)
+    total_words = max(0, target_words - COLD_OPEN_OUTRO_RESERVE_WORDS)
     budgets = _allocate_word_budgets(outline.stories, score_by_id, total_words)
     for story, budget in zip(outline.stories, budgets):
         story.word_budget = budget
