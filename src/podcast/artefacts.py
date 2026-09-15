@@ -10,7 +10,7 @@ import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 
-from podcast.models import CritiqueOutput, Episode, OutlineOutput, RankOutput, ScriptOutput
+from podcast.models import Episode, OutlineOutput, PerformOutput, RankOutput
 
 
 def new_episode_id(now: datetime | None = None) -> str:
@@ -38,12 +38,6 @@ def load_outline_output(dir_path: Path) -> OutlineOutput:
     return OutlineOutput.model_validate_json(outline_path.read_text(encoding="utf-8"))
 
 
-def tts_script_output(critique_output: CritiqueOutput) -> ScriptOutput:
-    """The critique stage's revised script, wrapped back into a ScriptOutput
-    shape so tts_stage's signature doesn't need to know about critique."""
-    return ScriptOutput(
-        episode_id=critique_output.episode_id,
-        generated_at=critique_output.generated_at,
-        model=critique_output.model,
-        script=critique_output.revised_script,
-    )
+def load_perform_output(dir_path: Path) -> PerformOutput:
+    perform_path = dir_path / "performance.json"
+    return PerformOutput.model_validate_json(perform_path.read_text(encoding="utf-8"))

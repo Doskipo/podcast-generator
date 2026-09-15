@@ -1,7 +1,7 @@
 import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { CHART, PROVIDER_COLOR } from '../../lib/chartColors.js'
 
-const STAGE_LABEL = { rank: 'Rank', outline: 'Outline', script: 'Script', critique: 'Critique', tts: 'TTS' }
+const STAGE_LABEL = { rank: 'Rank', outline: 'Outline', script: 'Script', critique: 'Critique', perform: 'Perform', tts: 'TTS' }
 const PROVIDER_LABEL = { openai: 'OpenAI', elevenlabs: 'ElevenLabs' }
 
 export default function CostByStageChart({ data }) {

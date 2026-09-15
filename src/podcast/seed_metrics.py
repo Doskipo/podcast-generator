@@ -23,18 +23,28 @@ from podcast.models import Profile, TokenUsage
 # Pipeline stage order — a local copy, not imported from generate.py, to
 # avoid a generate.py <-> seed_metrics.py import cycle (generate.py's own
 # main() dispatches to this module's seed()).
-STAGES = ["fetch", "rank", "outline", "script", "critique", "tts", "stitch"]
+STAGES = ["fetch", "rank", "outline", "script", "critique", "perform", "tts", "stitch"]
 
-_LLM_MODELS = {"rank": "gpt-4o-mini", "outline": "gpt-4o-mini", "script": "gpt-4o", "critique": "gpt-4o"}
+_LLM_MODELS = {
+    "rank": "gpt-4o-mini",
+    "outline": "gpt-4o-mini",
+    "script": "gpt-4o",
+    "critique": "gpt-4o",
+    "perform": "gpt-4o",
+}
 
 # Plausible (prompt_lo, prompt_hi, completion_lo, completion_hi) token counts
 # per LLM stage — order-of-magnitude estimates from docs/decisions.md
-# ("Script rebuild" cost table), not measured.
+# ("Script rebuild" cost table), not measured. "perform" only covers its
+# primary performance-writing call — the fact-check call's cheap-model cost
+# isn't separately mocked, same convention as rank's unmocked echo-mismatch
+# rescoring cost (see docs/decisions.md, "perform stage").
 _STAGE_TOKEN_RANGES = {
     "rank": (600, 900, 300, 500),
     "outline": (700, 1100, 400, 700),
     "script": (2500, 3600, 1700, 2500),
     "critique": (1800, 2500, 200, 400),
+    "perform": (2200, 3200, 1400, 2200),
 }
 _STAGE_ELAPSED_RANGES_S = {
     "fetch": (5, 20),
@@ -42,6 +52,7 @@ _STAGE_ELAPSED_RANGES_S = {
     "outline": (5, 15),
     "script": (15, 45),
     "critique": (10, 30),
+    "perform": (10, 30),
     "tts": (30, 90),
     "stitch": (2, 8),
 }

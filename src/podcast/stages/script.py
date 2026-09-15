@@ -25,6 +25,7 @@ from podcast.models import (
     Episode,
     HostStance,
     Line,
+    Listener,
     Outline,
     OutlineOutput,
     OutlineStory,
@@ -116,6 +117,17 @@ def _render_stance(stance: HostStance) -> str:
     return f"{stance.host}: {stance.attitude} — {stance.why}{arc_part}"
 
 
+def _render_listener(listener: Listener) -> str:
+    """`Listener.facts` replaces the old bare-name-only hook: everything
+    listed here is fair game for a tangent/aside (see the "never invent
+    hobbies, opinions..." hard rule below, which still bounds it to exactly
+    what's rendered here)."""
+    if not listener.facts:
+        return f"Listener: {listener.name}."
+    facts_block = "\n".join(f"  - {fact}" for fact in listener.facts)
+    return f"Listener: {listener.name}. Known facts about them:\n{facts_block}"
+
+
 def _render_outline_story(story: OutlineStory, recurring_bits_by_id: dict[str, RecurringBit]) -> str:
     angle = story.angle
     bit_line = ""
@@ -204,7 +216,7 @@ def _build_prompts(profile: Profile, outline: Outline, articles: list[Article]) 
     system_prompt = (
         "You are writing a two-host podcast script for text-to-speech.\n\n"
         f"Hosts:\n{persona_block}\n\n"
-        f"Listener: {podcast.listener.name}.\n\n"
+        f"{_render_listener(podcast.listener)}\n\n"
         f"Style:\n{_style_instructions(podcast.style)}\n\n"
         f"Tone: {podcast.tone}.\n\n"
         "Hard rules:\n"
@@ -248,9 +260,10 @@ def _build_prompts(profile: Profile, outline: Outline, articles: list[Article]) 
         "the recurring bit never also carries a tangent (the outline already keeps these "
         "separate).\n"
         "- Only state something about the listener if it's explicitly given in the "
-        "Listener line above — never invent hobbies, opinions, preferences, or biography "
-        "for them. If a tangent references the listener and nothing concrete is given, "
-        "ground it in a host's own backstory instead.\n"
+        "Listener info above (their name, or one of their listed facts) — never invent "
+        "hobbies, opinions, preferences, or biography beyond what's listed. If a tangent "
+        "references the listener and nothing concrete is given, ground it in a host's own "
+        "backstory instead.\n"
         f"- No line should run over {MAX_LINE_WORDS} words, except within the recurring "
         "bit's own segment. Split exposition into a short back-and-forth exchange between "
         "the hosts instead of one long line.\n"

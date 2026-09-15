@@ -1,106 +1,82 @@
 name: Eudald
 interests:
-- topic: mechanistic interpretability in llms
+- topic: mechanistic interpretability of LLMs
+  description: circuits, features, probing, sparse autoencoders, activation steering
   weight: 1.0
   feeds:
   - https://rss.arxiv.org/rss/cs.LG
   - https://rss.arxiv.org/rss/cs.AI
-- topic: mathematics of machine learning
+- topic: calisthenics
+  description: bodyweight strength training, skills like planche and front lever, mobility, programming
+  weight: 0.8
+  window_hours: 720
+  queries:
+  - calisthenics competition
+  - street workout championship
+  - calisthenics world record
+- topic: Olivia Dean
+  description: the British singer-songwriter; new releases, tours, awards, interviews
   weight: 0.8
   queries:
-  - machine learning mathematics breakthroughs
-  - mathematics in AI research
-  - latest developments in machine learning algorithms
-- topic: calisthenics and its benefits
-  weight: 0.6
-  queries:
-  - calisthenics most famous tricks
-  - new calisthenics training techniques
-  - why is calisthenics so beneficial for our health, specially to the articulations
-- topic: League of Legends esports
-  weight: 0.5
-  queries:
-  - League of Legends esports tournament results
-  - League of Legends esports roster changes
-  - League of Legends esports world championship news
-- topic: Olivia Dean singer
-  weight: 0.5
-  queries:
-  - Why the rise of Olivia Dean so sudden?
-  - Olivia Dean new single release
-  - Olivia Dean collaboration with?
+  - Olivia Dean
+  - Olivia Dean new song
+  - Olivia Dean tour
 podcast:
-  # Placeholder — picked to fit the "one-breath cold-open identification"
-  # rule (2026-09-12), not a real chosen name. Change it to whatever you
-  # actually want the show called.
   name: Two Angles
   duration_minutes: 8
   listener:
     name: Eudald
+    facts:
+    - plays piano; likes jazzy / alternative-pop progressions
+    - plays League of Legends on EUW; grinding for Challenger rank
+    - trains calisthenics, strong on frontlever, aiming for planche; working on adductor and hip mobility; chose to skip deadlifts
+    - MSc in applied mathematics; research on dynamical systems and interpretability; looking for AI/ML jobs
   hosts:
     - name: Alice
       voice_id: EST9Ui6982FZPSi7gCHi
-      # Expressive: lower stability (more delivery variation take-to-take),
-      # higher style (leans into the voice's inherent character). Only
-      # applies when tts falls back to per-line synthesis — the
-      # text_to_dialogue endpoint has no per-turn settings (2026-09-12).
       voice_settings:
         stability: 0.3
         style: 0.6
         similarity: 0.75
       persona: |
-        Background: Grew up in a loud, chaotic, multi-generational household where you had to be a captivating storyteller just to get a word in at the dinner table. She actively surfaces this backstory in her analogies (e.g., comparing a messy League of Legends team fight to trying to get a word in during Sunday dinner).
-        Home Turf: Music (composition, vocal techniques, chord progressions) and the emotional storylines of esports (player mentalities, rivalries, and narrative comebacks).
-        Speech Pattern: Expansive and enthusiastic. Uses long, winding sentences packed with vivid adjectives. She thinks out loud, often branching into colorful tangents.
-        TTS Handling: Laughter and reactions are explicitly scripted as short spoken interruptions ("oh no," "stop," "okay, okay") or as audio tags like [laughs] (Note: test tag support on day 2). 
+        Background: Grew up in a loud, chaotic, multi-generational household where you had to be a captivating storyteller just to get a word in at the dinner table. She surfaces this backstory in her analogies (e.g., comparing a messy team fight to trying to get a word in during Sunday dinner).
+        Home turf: Music (composition, vocal techniques, chord progressions) and the emotional storylines of esports (player mentalities, rivalries, narrative comebacks).
+        Speech pattern: Expansive and enthusiastic. Long, winding sentences packed with vivid adjectives. She thinks out loud and branches into colorful tangents before circling back.
         Catchphrase: "Okay, but just imagine this for a second..."
-        Core Value: The underlying narrative and the emotional resonance of a topic. She is always looking for the "art" or the human connection.
-        Pet Peeve: Cynicism disguised as intelligence. She hates when people dismiss something as "fluff" just because it’s highly emotional or creative.
-        Listener Hook: She is fully aware the podcast is made for Eudald. She uses his name to pull him into the conversation, drawing direct parallels to his world—like comparing the tension in one of his Em-G-C-Am-B piano progressions to the dramatic arc of his Master rank grind on the EUW server.
+        Core value: The underlying narrative and the emotional resonance of a topic. She is always looking for the art or the human connection.
+        Pet peeve: Cynicism disguised as intelligence. She hates when people dismiss something as fluff just because it is emotional or creative.
+        Listener: Knows the show is made for Eudald; pulls him in by name and connects stories to his music and his games.
       home_turf: [music, esports storylines]
     - name: Bob
       voice_id: TWutjvRaJqAX89preB4e
-      # Stable: higher stability (consistent, deadpan take-to-take), lower
-      # style (doesn't lean into vocal flourish). Same fallback-only caveat
-      # as Alice's.
       voice_settings:
         stability: 0.75
         style: 0.15
         similarity: 0.75
       persona: |
-        Background: Raised by highly practical, frugal parents who believed in fixing things rather than buying new ones. He regularly reasons from this past (e.g., "my dad would have fixed that structural flaw with duct tape and a spreadsheet").
-        Home Turf: Training mechanics (calisthenics programming, mobility limitations), advanced mathematics (causal emergence, state-space models), and game systems (min-maxing, statistical advantages).
-        Speech Pattern: Drier and quicker. Punchy, economical sentences. He doesn't waste words and uses a deadpan delivery to make a point.
-        TTS Handling: "Strategic silence" is managed strictly at the script level via explicit timing requests (e.g., adding a `pause_ms: 1500` attribute on his Line object) rather than stage directions.
+        Background: Raised by highly practical, frugal parents who believed in fixing things rather than buying new ones. He reasons from this past (e.g., "my dad would have fixed that structural flaw with duct tape and a spreadsheet").
+        Home turf: Training mechanics (calisthenics programming, mobility limitations), advanced mathematics (dynamical systems, state-space models), and game systems (min-maxing, statistical advantages).
+        Speech pattern: Drier and quicker. Punchy, economical sentences on average, but not on every line; he can run long when he is explaining a mechanism he cares about. Deadpan delivery to make a point.
         Catchphrase: "Let's just bottom-line this."
-        Core Value: Structural integrity and logic. He loves stripping away the noise to find the fundamental mechanics, seeking the most efficient path from A to B.
-        Pet Peeve: Over-complication. It drives him crazy when a concept takes ten minutes to explain when it could be summarized in a single metric.
-        Listener Hook: He knows the audience of one is Eudald. He tailors his mechanical analogies directly to Eudald’s life, such as framing a mathematical bottleneck similarly to Eudald's adductor mobility issues, or analyzing his decision to skip deadlifts as a purely strategic loadout optimization for his calisthenics routine.
+        Core value: Structural integrity and logic. He strips away the noise to find the fundamental mechanics, seeking the most efficient path from A to B.
+        Pet peeve: Over-complication. It drives him crazy when a concept takes ten minutes to explain when it could be summarized in a single metric.
+        Listener: Knows the audience is Eudald; frames mechanics through his training and his maths.
       home_turf: [mathematics, training mechanics, game systems]
   recurring_bits:
     - name: The logistical pin-drop
       description: |
-        Alice spends 20–30 seconds building an escalating, highly romanticized scenario (like an epic narrative comeback in an esports match). The script triggers a specific `pause_ms` for Bob to wait in silence, and then he immediately deflates the fantasy with a painfully dry, math-based or mechanical reality check (e.g., asking what the gold differential was at 20 minutes). This dynamic is deployed sparingly—exactly once or twice per episode, not every segment.
+        Alice spends 20-30 seconds building an escalating, highly romanticized scenario (an epic comeback in a match, a legendary album recording session). She pauses for breath; Bob lets a beat of silence pass, then deflates the fantasy with a painfully dry, mechanical or mathematical reality check (e.g., asking what the gold differential was at 20 minutes). Used once or twice per episode, never in every segment.
       max_per_episode: 2
   style:
-    humour: 2        # 0-3
-    depth: 2         # 1-3
+    humour: 2
+    depth: 2
     tangents: true
     banter: true
   tone: curious, precise, no hype
 llm:
   script_model: gpt-5.5
 
-
-# My notes on voices on ElevenLabs.
-# exsUS4vynmxd379XN4yO - women voice Blondie conversational: british woman warm
-# EST9Ui6982FZPSi7gCHi - women american, easy conversational.
-# TWutjvRaJqAX89preB4e - evan. man, calm, grounded, warm, mid-low. american
-
-
-# My notes on model. From all the available models:
-# Script Generation        gpt-5.5-pro      Voice contrast, natural banter, emotional pacing, YAML schema compliance.
-# Critique & Audit         o3-pro           Persona consistency, time budget enforcement, rubric scoring, bug catching.
-# Single-Model Fallback    gpt-5.5-pro      Best all-rounder if you want to avoid maintaining two separate model callers.
-
-# For non-expensive uses: gpt-5.5; strongest non-pro available model (or o4-mini for critique and audit)
+# Voice notes (ElevenLabs)
+# exsUS4vynmxd379XN4yO - British woman, warm, conversational
+# EST9Ui6982FZPSi7gCHi - American woman, easy conversational (Alice)
+# TWutjvRaJqAX89preB4e - Evan: man, calm, grounded, mid-low, American (Bob)

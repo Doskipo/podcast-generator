@@ -30,6 +30,8 @@ from podcast.models import (
     Outline,
     OutlineOutput,
     OutlineStory,
+    Performance,
+    PerformOutput,
     PodcastSettings,
     Profile,
     RankedArticle,
@@ -156,7 +158,18 @@ def _patch_stages(monkeypatch, calls: list[str]) -> None:
             terse_hosts=[],
         )
 
-    def fake_tts_stage(episode, script_output, client=None):
+    def fake_perform_stage(episode, critique_output, articles, client=None):
+        calls.append("perform")
+        return PerformOutput(
+            episode_id=episode.episode_id,
+            generated_at=datetime.now(timezone.utc),
+            model="test-model",
+            fact_check_model="test-model-cheap",
+            performance=Performance(title="t", cold_open=[], segments=[], outro=[]),
+            fact_flags=[],
+        )
+
+    def fake_tts_stage(episode, perform_output, client=None):
         calls.append("tts")
         return TTSOutput(
             episode_id=episode.episode_id,
@@ -180,6 +193,7 @@ def _patch_stages(monkeypatch, calls: list[str]) -> None:
     monkeypatch.setattr(service, "outline_stage", fake_outline_stage)
     monkeypatch.setattr(service, "script_stage", fake_script_stage)
     monkeypatch.setattr(service, "critique_stage", fake_critique_stage)
+    monkeypatch.setattr(service, "perform_stage", fake_perform_stage)
     monkeypatch.setattr(service, "tts_stage", fake_tts_stage)
     monkeypatch.setattr(service, "stitch_stage", fake_stitch_stage)
 
@@ -222,9 +236,14 @@ def test_run_episode_until_critique_stops_before_tts(tmp_path, monkeypatch):
     assert calls == ["fetch", "rank", "outline", "script", "critique"]
 
 
+def test_run_episode_until_perform_stops_before_tts(tmp_path, monkeypatch):
+    _, calls = _run(monkeypatch, tmp_path, "ep5b", until="perform")
+    assert calls == ["fetch", "rank", "outline", "script", "critique", "perform"]
+
+
 def test_run_episode_without_until_runs_the_full_pipeline(tmp_path, monkeypatch):
     _, calls = _run(monkeypatch, tmp_path, "ep6")
-    assert calls == ["fetch", "rank", "outline", "script", "critique", "tts", "stitch"]
+    assert calls == ["fetch", "rank", "outline", "script", "critique", "perform", "tts", "stitch"]
 
 
 def test_run_episode_prints_actual_feeds_count(tmp_path, monkeypatch, capsys):
@@ -243,7 +262,7 @@ def test_run_episode_emits_events_in_order(tmp_path, monkeypatch):
         ).all()
 
     types = [e.type for e in events]
-    assert types == ["generated"] + ["stage_done"] * 7 + ["completed"]
+    assert types == ["generated"] + ["stage_done"] * 8 + ["completed"]
 
 
 def test_run_episode_records_total_characters_and_cost(tmp_path, monkeypatch):
@@ -286,6 +305,36 @@ def test_run_episode_marks_failed_on_stage_exception_and_reraises(tmp_path, monk
     assert len(failed_events) == 1
     assert failed_events[0].metadata_json["stage"] == "outline"
     assert failed_events[0].metadata_json["error"] == "boom"
+
+
+def test_run_episode_marks_failed_when_perform_stage_raises(tmp_path, monkeypatch):
+    calls: list[str] = []
+    _patch_stages(monkeypatch, calls)
+    _patch_episode_dir(monkeypatch, tmp_path)
+    _configure_test_db(monkeypatch, tmp_path)
+
+    def boom(episode, critique_output, articles, client=None):
+        raise ValueError("perform boom")
+
+    monkeypatch.setattr(service, "perform_stage", boom)
+
+    with db.session_scope() as session:
+        profile_id = _seed_profile(session, _profile())
+
+    with pytest.raises(ValueError, match="perform boom"):
+        service.run_episode(_profile(), profile_id, episode_id="ep10b")
+
+    with db.session_scope() as session:
+        record = session.exec(select(db.EpisodeRecord).where(db.EpisodeRecord.episode_id == "ep10b")).first()
+        failed_events = session.exec(
+            select(db.EventRecord).where(db.EventRecord.episode_id == "ep10b", db.EventRecord.type == "failed")
+        ).all()
+
+    assert record.status == "failed"
+    assert record.stage_reached == "perform"
+    assert len(failed_events) == 1
+    assert failed_events[0].metadata_json["stage"] == "perform"
+    assert failed_events[0].metadata_json["error"] == "perform boom"
 
 
 def test_run_episode_stops_at_no_content_when_rank_selects_nothing(tmp_path, monkeypatch):
@@ -398,6 +447,36 @@ def test_resume_from_rank_also_stops_at_no_content(tmp_path, monkeypatch):
         record = session.exec(select(db.EpisodeRecord).where(db.EpisodeRecord.episode_id == episode_id)).first()
     assert record.status == "no_content"
     assert record.no_content_interests == ["testing"]
+
+
+def test_resume_from_critique_runs_perform_then_tts_then_stitch(tmp_path, monkeypatch):
+    _configure_test_db(monkeypatch, tmp_path)
+    _patch_episode_dir(monkeypatch, tmp_path)
+    calls: list[str] = []
+    _patch_stages(monkeypatch, calls)
+
+    profile = _profile()
+    with db.session_scope() as session:
+        profile_id = _seed_profile(session, profile)
+
+    episode = Episode(episode_id="ep14", created_at=datetime.now(timezone.utc), profile=profile)
+    critique_output = CritiqueOutput(
+        episode_id="ep14",
+        generated_at=datetime.now(timezone.utc),
+        model="test-model",
+        critique=Critique(flags=[]),
+        original_script=Script(title="t", cold_open=[], segments=[], outro=[]),
+        revised_script=Script(title="t", cold_open=[], segments=[], outro=[]),
+        total_words=0,
+        over_budget_segments=[],
+        terse_hosts=[],
+    )
+
+    with db.session_scope() as session:
+        record = service.get_or_create_episode_record(session, "ep14", profile_id)
+        service.resume_from_critique(session, record, episode, critique_output, articles=[], until=None)
+
+    assert calls == ["perform", "tts", "stitch"]
 
 
 def test_upsert_profile_is_idempotent(tmp_path, monkeypatch):

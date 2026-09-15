@@ -18,7 +18,7 @@ from datetime import date, datetime, timedelta, timezone
 from sqlmodel import Session, select
 
 from podcast import db, paths
-from podcast.models import CritiqueOutput, OutlineOutput, RankOutput, ScriptOutput, TokenUsage, TTSOutput
+from podcast.models import CritiqueOutput, OutlineOutput, PerformOutput, RankOutput, ScriptOutput, TokenUsage, TTSOutput
 from podcast.service import COST_PER_1K_CHARS_USD
 
 DAILY_SERIES_DAYS = 30
@@ -44,6 +44,7 @@ _USAGE_MANIFESTS: list[tuple[str, str, type]] = [
     ("outline", "outline.json", OutlineOutput),
     ("script", "script.json", ScriptOutput),
     ("critique", "critique.json", CritiqueOutput),
+    ("perform", "performance.json", PerformOutput),
 ]
 
 

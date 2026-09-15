@@ -20,13 +20,13 @@ from dotenv import load_dotenv
 
 from podcast import db, seed_metrics, service
 from podcast.artefacts import load_episode_manifest, load_outline_output, load_rank_output
-from podcast.models import CritiqueOutput, FetchOutput, OutlineOutput, Profile, RankOutput, ScriptOutput
+from podcast.models import CritiqueOutput, FetchOutput, OutlineOutput, PerformOutput, Profile, RankOutput, ScriptOutput
 from podcast.stages.fetch import ensure_interest_queries
 
 logger = logging.getLogger(__name__)
 
 # Pipeline order, for --until: stop right after the named stage runs.
-STAGES = ["fetch", "rank", "outline", "script", "critique", "tts", "stitch"]
+STAGES = ["fetch", "rank", "outline", "script", "critique", "perform", "tts", "stitch"]
 
 
 def run(profile_path: str, episode_id: str | None = None, until: str | None = None) -> str:
@@ -43,7 +43,7 @@ def run(profile_path: str, episode_id: str | None = None, until: str | None = No
 
 def run_from_articles(articles_path: str, until: str | None = None) -> str:
     """Re-run from a persisted articles.json: rank -> outline -> script ->
-    critique -> tts -> stitch."""
+    critique -> perform -> tts -> stitch."""
     articles_file = Path(articles_path)
     episode_id = articles_file.parent.name
     episode = load_episode_manifest(articles_file.parent)
@@ -57,7 +57,7 @@ def run_from_articles(articles_path: str, until: str | None = None) -> str:
 
 def run_from_ranked(ranked_path: str, until: str | None = None) -> str:
     """Re-run from a persisted ranked.json: outline -> script -> critique ->
-    tts -> stitch."""
+    perform -> tts -> stitch."""
     ranked_file = Path(ranked_path)
     episode_id = ranked_file.parent.name
     episode = load_episode_manifest(ranked_file.parent)
@@ -70,9 +70,9 @@ def run_from_ranked(ranked_path: str, until: str | None = None) -> str:
 
 
 def run_from_outline(outline_path: str, until: str | None = None) -> str:
-    """Re-run from a persisted outline.json: script -> critique -> tts ->
-    stitch. Also needs the episode's ranked.json (same directory) for the
-    selected articles' full text."""
+    """Re-run from a persisted outline.json: script -> critique -> perform ->
+    tts -> stitch. Also needs the episode's ranked.json (same directory) for
+    the selected articles' full text."""
     outline_file = Path(outline_path)
     episode_id = outline_file.parent.name
     episode = load_episode_manifest(outline_file.parent)
@@ -86,11 +86,11 @@ def run_from_outline(outline_path: str, until: str | None = None) -> str:
 
 
 def run_from_script(script_path: str, until: str | None = None) -> str:
-    """Re-run from a persisted script.json: critique -> tts -> stitch. Also
-    needs the episode's ranked.json and outline.json (same directory) — the
-    articles' full text to re-check grounding, and the outline's per-segment
-    word_budget/recurring-bit assignment for the critique's budget/line-length
-    checks."""
+    """Re-run from a persisted script.json: critique -> perform -> tts ->
+    stitch. Also needs the episode's ranked.json and outline.json (same
+    directory) — the articles' full text to re-check grounding, and the
+    outline's per-segment word_budget/recurring-bit assignment for the
+    critique's budget/line-length checks."""
     script_file = Path(script_path)
     episode_id = script_file.parent.name
     episode = load_episode_manifest(script_file.parent)
@@ -105,16 +105,32 @@ def run_from_script(script_path: str, until: str | None = None) -> str:
 
 
 def run_from_critique(critique_path: str, until: str | None = None) -> str:
-    """Re-run from a persisted critique.json: tts -> stitch."""
+    """Re-run from a persisted critique.json: perform -> tts -> stitch. Also
+    needs the episode's ranked.json (same directory) for the selected
+    articles' full text, to re-check grounding on the performed text."""
     critique_file = Path(critique_path)
     episode_id = critique_file.parent.name
     episode = load_episode_manifest(critique_file.parent)
     critique_output = CritiqueOutput.model_validate_json(critique_file.read_text(encoding="utf-8"))
+    rank_output = load_rank_output(critique_file.parent)
 
     with db.session_scope() as session:
         profile_row = service.upsert_profile_from_yaml(episode.profile, session)
         record = service.get_or_create_episode_record(session, episode_id, profile_row.id)
-        return service.resume_from_critique(session, record, episode, critique_output, until)
+        return service.resume_from_critique(session, record, episode, critique_output, rank_output.selected, until)
+
+
+def run_from_performance(performance_path: str, until: str | None = None) -> str:
+    """Re-run from a persisted performance.json: tts -> stitch."""
+    performance_file = Path(performance_path)
+    episode_id = performance_file.parent.name
+    episode = load_episode_manifest(performance_file.parent)
+    perform_output = PerformOutput.model_validate_json(performance_file.read_text(encoding="utf-8"))
+
+    with db.session_scope() as session:
+        profile_row = service.upsert_profile_from_yaml(episode.profile, session)
+        record = service.get_or_create_episode_record(session, episode_id, profile_row.id)
+        return service.resume_from_performance(session, record, episode, perform_output, until)
 
 
 def serve() -> None:
@@ -202,27 +218,32 @@ def main() -> None:
     parser.add_argument(
         "--from-articles",
         default=None,
-        help="path to a persisted articles.json; skips fetch, re-runs rank -> outline -> script -> critique -> tts -> stitch",
+        help="path to a persisted articles.json; skips fetch, re-runs rank -> outline -> script -> critique -> perform -> tts -> stitch",
     )
     parser.add_argument(
         "--from-ranked",
         default=None,
-        help="path to a persisted ranked.json; skips fetch/rank, re-runs outline -> script -> critique -> tts -> stitch",
+        help="path to a persisted ranked.json; skips fetch/rank, re-runs outline -> script -> critique -> perform -> tts -> stitch",
     )
     parser.add_argument(
         "--from-outline",
         default=None,
-        help="path to a persisted outline.json; skips through outline, re-runs script -> critique -> tts -> stitch",
+        help="path to a persisted outline.json; skips through outline, re-runs script -> critique -> perform -> tts -> stitch",
     )
     parser.add_argument(
         "--from-script",
         default=None,
-        help="path to a persisted script.json; skips through script, re-runs critique -> tts -> stitch",
+        help="path to a persisted script.json; skips through script, re-runs critique -> perform -> tts -> stitch",
     )
     parser.add_argument(
         "--from-critique",
         default=None,
-        help="path to a persisted critique.json; skips through critique, re-runs tts -> stitch",
+        help="path to a persisted critique.json; skips through critique, re-runs perform -> tts -> stitch",
+    )
+    parser.add_argument(
+        "--from-performance",
+        default=None,
+        help="path to a persisted performance.json; skips through perform, re-runs tts -> stitch",
     )
     parser.add_argument(
         "--until",
@@ -231,6 +252,10 @@ def main() -> None:
         help="stop the pipeline after this stage runs",
     )
     args = parser.parse_args()
+
+    if args.from_performance:
+        run_from_performance(args.from_performance, args.until)
+        return
 
     if args.from_critique:
         run_from_critique(args.from_critique, args.until)
@@ -255,7 +280,7 @@ def main() -> None:
     if not args.profile:
         parser.error(
             "--profile is required unless --from-articles, --from-ranked, --from-outline, "
-            "--from-script or --from-critique is given"
+            "--from-script, --from-critique, or --from-performance is given"
         )
     run(args.profile, args.episode_id, args.until)
 

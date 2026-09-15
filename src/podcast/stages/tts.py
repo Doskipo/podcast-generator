@@ -1,21 +1,23 @@
 """TTS stage: synthesize the script's dialogue with ElevenLabs.
 
-Primary path: the text_to_dialogue endpoint, the whole flattened script as
-speaker-tagged turns in one (or a few, if chunked for length) request(s) —
-this is what makes inter-line prosody/timing sound like an actual
+Primary path: the text_to_dialogue endpoint, the whole flattened performance
+as speaker-tagged turns in one (or a few, if chunked for length) request(s)
+— this is what makes inter-line prosody/timing sound like an actual
 conversation instead of independently-synthesized clips stitched together.
 Falls back to per-line synthesis (text_to_speech, one call per line) if the
 dialogue endpoint fails for any reason. Both paths use a v3-class model, for
-audio-tag (Line.delivery) support.
+inline audio-tag support.
 
-Typed input: Episode (+ Profile snapshot) and ScriptOutput. Typed output:
+Typed input: Episode (+ Profile snapshot) and PerformOutput. Typed output:
 TTSOutput, persisted as data/episodes/<episode_id>/tts_manifest.json. Audio
 files are written under data/episodes/<episode_id>/segments/, one per line
 either way — dialogue-mode audio is split into per-line clips using the
 endpoint's voice_segments timestamps. See docs/decisions.md ("Voice and
 dynamics pass") for why, and for what dialogue mode can't do (per-host
 voice_settings — DialogueInput has no per-turn settings field, so those only
-take effect in the per-line fallback).
+take effect in the per-line fallback); and ("perform stage") for why
+PerformedLine.text is sent verbatim here — any v3 audio tag is already
+inline in the text, written by the perform stage, not prefixed here.
 """
 
 from __future__ import annotations
@@ -34,9 +36,9 @@ from elevenlabs.types.voice_settings import VoiceSettings
 from pydub import AudioSegment
 
 from podcast.env import require_env
-from podcast.models import Episode, Host, HostVoiceSettings, Line, ScriptOutput, TTSLine, TTSOutput
+from podcast.models import Episode, Host, HostVoiceSettings, PerformedLine, PerformOutput, TTSLine, TTSOutput
 from podcast.paths import episode_dir
-from podcast.stages.script import flatten_lines
+from podcast.stages.perform import flatten_performed_lines
 
 logger = logging.getLogger(__name__)
 
@@ -52,19 +54,6 @@ def _sanitize_speaker(speaker: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "_", speaker).strip("_") or "speaker"
 
 
-def _tagged_text(line: Line) -> str:
-    """Prefix the line's delivery as a bracketed audio tag ("[laughs] ...")
-    — understood by v3-class models, which both synthesis paths use here.
-    Skips prefixing if the writer already opened the line with a bracketed
-    tag itself (seen in practice: a line with delivery="laughs" whose own
-    text already starts "[laughs] ...") — otherwise it'd double up."""
-    if not line.delivery:
-        return line.text
-    if line.text.lstrip().startswith("["):
-        return line.text
-    return f"[{line.delivery}] {line.text}"
-
-
 def _content_key(text: str) -> str:
     """Short hash of the exact text sent to synthesis. Filenames include this
     so the skip-if-exists resume check is content-addressed, not just
@@ -77,9 +66,9 @@ def _content_key(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()[:8]
 
 
-def _chunk_lines(lines: list[Line], char_limit: int) -> list[list[Line]]:
-    chunks: list[list[Line]] = []
-    current: list[Line] = []
+def _chunk_lines(lines: list[PerformedLine], char_limit: int) -> list[list[PerformedLine]]:
+    chunks: list[list[PerformedLine]] = []
+    current: list[PerformedLine] = []
     current_chars = 0
     for line in lines:
         if current and current_chars + len(line.text) > char_limit:
@@ -146,7 +135,7 @@ def _synthesize_dialogue(
     client: ElevenLabs,
     profile_hosts: list[Host],
     model_id: str,
-    lines: list[Line],
+    lines: list[PerformedLine],
     filenames: list[str],
     segments_dir: Path,
 ) -> bool:
@@ -170,7 +159,7 @@ def _synthesize_dialogue(
             continue
 
         dialogue_inputs = [
-            DialogueInput(text=_tagged_text(line), voice_id=voice_by_speaker[line.speaker]) for line in chunk
+            DialogueInput(text=line.text, voice_id=voice_by_speaker[line.speaker]) for line in chunk
         ]
         try:
             response = _dialogue_convert(client, dialogue_inputs, model_id)
@@ -194,7 +183,7 @@ def _synthesize_per_line(
     client: ElevenLabs,
     profile_hosts: list[Host],
     model_id: str,
-    lines: list[Line],
+    lines: list[PerformedLine],
     filenames: list[str],
     segments_dir: Path,
 ) -> None:
@@ -208,17 +197,17 @@ def _synthesize_per_line(
             continue
         voice_settings = _voice_settings_for(settings_by_speaker.get(line.speaker))
         audio_bytes = _synthesize(
-            client, voice_by_speaker[line.speaker], model_id, _tagged_text(line), voice_settings
+            client, voice_by_speaker[line.speaker], model_id, line.text, voice_settings
         )
         file_path.write_bytes(audio_bytes)
 
 
-def tts_stage(episode: Episode, script_output: ScriptOutput, client: ElevenLabs | None = None) -> TTSOutput:
+def tts_stage(episode: Episode, perform_output: PerformOutput, client: ElevenLabs | None = None) -> TTSOutput:
     if client is None:
         client = ElevenLabs(api_key=require_env("ELEVENLABS_API_KEY"))
 
     profile = episode.profile
-    lines = flatten_lines(script_output.script)
+    lines = flatten_performed_lines(perform_output.performance)
     known_speakers = {host.name for host in profile.podcast.hosts}
     for line in lines:
         if line.speaker not in known_speakers:
@@ -229,10 +218,11 @@ def tts_stage(episode: Episode, script_output: ScriptOutput, client: ElevenLabs 
     segments_dir = episode_dir(episode.episode_id) / "segments"
     segments_dir.mkdir(parents=True, exist_ok=True)
     # content-addressed: index + speaker + a hash of the exact synthesized
-    # text, so a stale file from a different script generation can never be
-    # mistaken for this run's line at the same position (see _content_key).
+    # text, so a stale file from a different performance generation can
+    # never be mistaken for this run's line at the same position (see
+    # _content_key).
     filenames = [
-        f"{i:03d}_{_sanitize_speaker(line.speaker)}_{_content_key(_tagged_text(line))}.mp3"
+        f"{i:03d}_{_sanitize_speaker(line.speaker)}_{_content_key(line.text)}.mp3"
         for i, line in enumerate(lines)
     ]
 
@@ -250,9 +240,10 @@ def tts_stage(episode: Episode, script_output: ScriptOutput, client: ElevenLabs 
             index=i,
             speaker=line.speaker,
             file=f"segments/{filenames[i]}",
-            # length of what's actually sent to ElevenLabs (including any
-            # delivery tag prefix) — that's what's billed, not just line.text
-            characters=len(_tagged_text(line)),
+            # length of what's actually sent to ElevenLabs — that's what's
+            # billed. Any v3 audio tag is already inline in line.text,
+            # written by the perform stage, not prefixed here.
+            characters=len(line.text),
             pause_ms=line.pause_ms,
         )
         for i, line in enumerate(lines)

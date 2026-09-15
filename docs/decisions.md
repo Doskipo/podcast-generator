@@ -1275,6 +1275,134 @@ interest before giving up on it, via a new `podcast/evergreen.py`.
   `rank_stage` before it ever returns, `no_content` already only fires once every interest's
   evergreen attempt has also come back empty, exactly as asked, for free.
 
+## Listener.facts — 2026-09-14
+Added `Listener.facts: list[str] = []` and render it into the script prompt in place of the old
+bare-name-only line (`_render_listener`, `script.py`).
+
+- **This was a latent bug, not just a new field.** `profiles/eudald.yaml` already had a
+  `listener.facts:` list (four real facts — piano, League of Legends, calisthenics, an MSc) that
+  pydantic's default `extra="ignore"` behavior on `Listener` was silently dropping on every load,
+  since the model only declared `name`. The script prompt's "Listener: {name}." line — and every
+  comment in outline.py/script.py saying "currently just their name, unless more is listed" — was
+  quietly stale the whole time the YAML had more listed. Loading the real profile after this
+  change confirms all four facts now reach `Profile.podcast.listener.facts`.
+- **Scoped to the script prompt only, per the ask.** `outline.py`'s tangent instruction ("may
+  only build on facts actually given above") and `critique.py`'s `invented_listener_detail` check
+  ("everything actually known about them") both still show only `listener.name` — so a script-
+  stage tangent can now reference a real fact, but outline can't suggest one from it, and critique
+  can't tell a genuine fact from an invention if it ever saw one. Flagging as a follow-up, not
+  fixed here: `_render_listener` (script.py) would need to move somewhere both stages can share,
+  or each grows its own equivalent render call.
+- The existing "never invent hobbies, opinions, preferences, or biography" hard rule is unchanged
+  in spirit — it still bounds the model to exactly what's rendered, now just a short list instead
+  of always a bare name.
+
+## Perform stage: content vs. performance separation — 2026-09-15
+Added a fourth script-related LLM stage, `perform` (`podcast/stages/perform.py`), between
+`critique` and `tts`. Takes critique's grounded `revised_script`, rewrites every line for voice
+performance — punctuation for flow, spoken (not enumerated) lists, one capitalised emphasis word
+per line where it matters, a delivery *arc* plus inline v3 audio tags, varied sentence contours,
+and a few lines of cold-open chit-chat before the existing show/host identification — and
+persists `performance.json`. `tts_stage` now reads `performance.json` instead of
+`script.json`/`critique.json`.
+
+- **Why a separate stage from critique, not one more critique criterion.** `critique.py` fixes
+  *what's wrong* by splicing rewrites into only the flagged lines — a narrow, targeted
+  intervention. Performance is a full-script rewrite (every line's text changes, not just flagged
+  ones) with a different risk profile (it must never touch a fact, only how the line sounds) —
+  different enough in scope and blast radius that it earns its own artefact, validation, and
+  retry cycle instead of overloading critique's flagged-line model.
+- **Why this is the last audio-shaping change before synthesis.** `tts_stage` now sends
+  `PerformedLine.text` straight to ElevenLabs, verbatim — the old `Line.delivery`-as-bracket-
+  prefix mechanism (`tts.py:_tagged_text`, from "Voice and dynamics pass") is gone entirely. Any
+  v3 audio tag lives inline in the text itself, written by the perform stage at the point the
+  emotion actually shifts, not bolted on as a line-start prefix afterward. Nothing downstream of
+  `perform` touches line text again, so this is deliberately the final place text/delivery is
+  decided — a future stage inserted between `perform` and `tts` would be a considered decision,
+  not something that could happen by accident.
+- **Grounding stays structural, not re-derived.** `PerformedSegment.headline`/`.source_ids` are
+  always overwritten from the matching original segment by index in code
+  (`perform.py:_apply_grounding`), never trusted from the model — the same "safe by construction"
+  philosophy as `critique.py:_apply_critique`. This only works because the performance-writing
+  model is held to a strict structural contract, enforced via `generate_with_retry`'s one-retry-
+  with-feedback: every segment and the outro must end up with the same line count *and* speaker
+  sequence as the original (only text/delivery/pause_ms may change); the cold_open may grow, but
+  only by *prepending* new chit-chat lines — the original cold_open's own speakers must still
+  appear, in order, as the tail of the performed cold_open (`_validate_cold_open_suffix`). A
+  cold_open of length 0 passes trivially, since there's nothing for chit-chat to be prepended to.
+- **Fact-check is a second, cheap-model call, not embedded in the writer's own self-report.**
+  `_generate_fact_check` (`profile.llm.model`, not `script_model`) compares the original and
+  performed text of every 1:1-aligned segment/outro line pair and flags any pair whose meaning
+  drifted (`FactChangeFlag`, `PerformOutput.fact_flags`) — informational, like critique's
+  `over_budget_segments`/`terse_hosts`, not retried or auto-corrected. New cold-open chit-chat
+  lines are excluded from this check — they have no original counterpart to compare against, and
+  they're host banter, not sourced content.
+- **Cost.** One `script_model`-tier call (comparable to or larger than critique's, since it
+  rewrites the whole script rather than just flagged lines) plus one cheap `model`-tier call for
+  the fact-check. `seed_metrics.py`'s `_STAGE_TOKEN_RANGES["perform"]` only covers the primary
+  call — the fact-check call's cost isn't separately mocked, the same convention already used for
+  rank's unmocked echo-mismatch rescoring.
+- **`artefacts.tts_script_output` (critique → ScriptOutput wrapper) is removed** — dead now that
+  `tts_stage` reads `PerformOutput` directly via the new, public `perform.py:
+  flatten_performed_lines`. `resume_from_critique` gained an `articles` parameter (needed by
+  `perform_stage`'s grounding re-check) — `generate.py:run_from_critique` now also loads the
+  episode's `ranked.json`, the same pattern `run_from_script`/`run_from_outline` already use for
+  auxiliary artefacts.
+- **Explicit scope boundary.** `routes_episodes.py`'s `_load_script_and_notes` (the API's
+  displayed script) still reads `critique.json`, unchanged — `Performance`'s line shape (arc-
+  description `delivery`, inline audio tags, capitalised emphasis) isn't meant for a "read the
+  script" display and wasn't asked to be wired in.
+
+## Packaging: Dockerfile, docker-compose, README/solution.md — 2026-09-15
+Added a multi-stage `Dockerfile`, a single-service `docker-compose.yml`, a filled-in `README.md`,
+and `solution.md`.
+
+- **Why one container, not one for the API and one for the built SPA.** `podcast/api/app.py`
+  already serves the built React SPA (`web/dist/`) as static files from the same FastAPI process
+  in production — that decision was made when the UI was added (see "User-facing UI"), precisely
+  so there'd be no separate frontend server to deploy or CORS-configure at runtime. Splitting
+  packaging into two containers would reintroduce exactly the origin-split problem that design
+  avoided, for no benefit: the SPA has no independent runtime (no server-side rendering, no API
+  of its own), it's just static files the same process already knows how to serve. One container
+  matches the one-process architecture the app already has.
+- **Multi-stage build.** Stage 1 (`node:22-bookworm-slim`) runs `npm ci && npm run build` to
+  produce `web/dist/`; stage 2 (`python:3.12-slim-bookworm`, matching `.python-version`) never
+  sees Node, npm, or `web/node_modules` — only the built `dist/` output is copied across. Keeps
+  the shipped image to Python + the app's own dependencies + `ffmpeg` (pydub's only system
+  dependency, for `stitch_stage`'s mp3 concatenation) + the uv binary itself (copied directly from
+  astral's own distroless image, no pip/curl bootstrap needed). `uv sync --frozen --no-dev` in the
+  final stage installs exactly `pyproject.toml`'s runtime dependency set — the `dev` group
+  (`pytest`) never reaches the image, per the task's own "no dev dependencies in the final stage."
+  Dependencies are installed in a layer before app source is copied in, so an app-only code change
+  doesn't invalidate the (comparatively slow) dependency-resolution layer on rebuild.
+- **Why a named volume for `data/`, not baking it into the image or a bind mount.** `podcast/
+  paths.py`'s `DATA_DIR`/`podcast/db.py`'s `DB_PATH` are both relative (`data/podcast.db`,
+  `data/episodes/<id>/...`) — the sqlite database *and* every episode's persisted artefacts/audio
+  live there, and CLAUDE.md's own architecture rule is explicit: "data/ is never deleted." Baking
+  `data/` into the image would mean every `docker compose build` (or any image rebuild) silently
+  resets the database and discards every episode ever generated — the opposite of what a
+  from-scratch pipeline that persists every stage's output for exactly this reason wants. A named
+  volume (`podcast-data`, declared in `docker-compose.yml`) persists across container recreation
+  and image rebuilds alike, without depending on a specific host path the way a bind mount would
+  (matters for reproducibility across machines/CI, not just this one setup). `VOLUME ["/app/data"]`
+  in the `Dockerfile` documents the mount point even for someone running the image directly,
+  without compose.
+- **`solution.md`** is a condensed write-up (architecture, key trade-offs, known simplifications,
+  future work) distilled from this decision log, for a reviewer who wants the summary before the
+  full dated history. **`sample.mp3`** (repo root) is a real generated episode's audio, copied
+  from an actual pipeline run (`data/episodes/20260914T165224Z-4bec4c/episode.mp3`) rather than a
+  fabricated demo clip — `data/` itself stays gitignored (per-user, per-run state), so this one
+  file was deliberately promoted to a tracked, committed asset instead.
+- **Verification: CI, not a local run.** Docker wasn't available in the environment this was
+  authored in (no Docker Desktop, no WSL) — rather than ship the Dockerfile/compose file unverified
+  or claim a check that didn't happen, added `.github/workflows/docker.yml`: on every push/PR
+  touching the Dockerfile, compose file, or app source, it builds the image, runs it with dummy
+  (non-functional) API keys — the app boots and serves `/`/`/docs` without needing real keys,
+  those are only read lazily inside pipeline stage functions — and asserts `/` returns the built
+  SPA's HTML (checked for Vite's `<div id="root">` mount point, not just a 200) and `/docs`
+  returns FastAPI's Swagger UI. Real, repeatable verification on every future change, not a
+  one-off manual check that goes stale.
+
 ## Future work.
 - Add **suggest topics from previous episodes** from the previous podcasts. So it generatos a topic 
 (or a bunch of topics) for a podcast for you.

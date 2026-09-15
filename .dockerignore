@@ -1,0 +1,13 @@
+.git
+.venv
+.pytest_cache
+.claude
+data
+docs
+tests
+sample.mp3
+*.md
+.env
+.env.example
+web/node_modules
+web/dist

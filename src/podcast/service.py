@@ -27,13 +27,14 @@ from pydantic import ValidationError
 from sqlmodel import Session, select
 
 from podcast import db
-from podcast.artefacts import load_episode_manifest, new_episode_id, tts_script_output
+from podcast.artefacts import load_episode_manifest, new_episode_id
 from podcast.models import (
     Article,
     CritiqueOutput,
     Episode,
     FetchOutput,
     OutlineOutput,
+    PerformOutput,
     Profile,
     RankOutput,
     ScriptOutput,
@@ -44,6 +45,7 @@ from podcast.paths import episode_dir
 from podcast.stages.critique import critique_stage
 from podcast.stages.fetch import fetch_stage
 from podcast.stages.outline import outline_stage
+from podcast.stages.perform import perform_stage
 from podcast.stages.rank import rank_stage
 from podcast.stages.script import script_stage
 from podcast.stages.stitch import stitch_stage
@@ -313,12 +315,39 @@ def _step_critique(
     return None if until == "critique" else critique_output
 
 
-def _run_outline_through_critique(
+def _step_perform(
+    session: Session,
+    record: db.EpisodeRecord,
+    episode: Episode,
+    critique_output: CritiqueOutput,
+    articles: list[Article],
+    until: str | None,
+) -> PerformOutput | None:
+    perform_output = call_stage(
+        session,
+        record,
+        "perform",
+        lambda: perform_stage(episode, critique_output, articles),
+        extra_metadata=lambda r: {
+            "fact_flags": len(r.fact_flags),
+            "cold_open_lines": len(r.performance.cold_open),
+            "segments": len(r.performance.segments),
+        },
+    )
+    print(
+        f"episode {episode.episode_id}: performed script with "
+        f"{len(perform_output.performance.cold_open)} cold-open line(s), "
+        f"{len(perform_output.fact_flags)} fact-change flag(s)"
+    )
+    return None if until == "perform" else perform_output
+
+
+def _run_outline_through_perform(
     session: Session, record: db.EpisodeRecord, episode: Episode, rank_output: RankOutput, until: str | None
-) -> CritiqueOutput | None:
-    """outline -> script -> critique, stopping early if `until` names one of
-    those stages. Shared by every entrypoint that starts at or before
-    outline."""
+) -> PerformOutput | None:
+    """outline -> script -> critique -> perform, stopping early if `until`
+    names one of those stages. Shared by every entrypoint that starts at or
+    before outline."""
     outline_output = _step_outline(session, record, episode, rank_output, until)
     if outline_output is None:
         return None
@@ -327,17 +356,21 @@ def _run_outline_through_critique(
     if script_output is None:
         return None
 
-    return _step_critique(session, record, episode, script_output, rank_output.selected, outline_output, until)
+    critique_output = _step_critique(session, record, episode, script_output, rank_output.selected, outline_output, until)
+    if critique_output is None:
+        return None
+
+    return _step_perform(session, record, episode, critique_output, rank_output.selected, until)
 
 
 def _run_tts_and_stitch(
-    session: Session, record: db.EpisodeRecord, episode: Episode, script_output: ScriptOutput, until: str | None
+    session: Session, record: db.EpisodeRecord, episode: Episode, perform_output: PerformOutput, until: str | None
 ) -> tuple[TTSOutput, StitchOutput] | None:
     tts_output = call_stage(
         session,
         record,
         "tts",
-        lambda: tts_stage(episode, script_output),
+        lambda: tts_stage(episode, perform_output),
         extra_metadata=lambda r: {"lines": len(r.lines), "synthesis_mode": r.synthesis_mode, "characters": r.total_characters},
     )
     print(
@@ -401,11 +434,11 @@ def run_episode(profile: Profile, profile_id: int, episode_id: str | None = None
         if not _check_grounding(session, record, episode, rank_output):
             return episode_id
 
-        critique_output = _run_outline_through_critique(session, record, episode, rank_output, until)
-        if critique_output is None:
+        perform_output = _run_outline_through_perform(session, record, episode, rank_output, until)
+        if perform_output is None:
             return episode_id
 
-        result = _run_tts_and_stitch(session, record, episode, tts_script_output(critique_output), until)
+        result = _run_tts_and_stitch(session, record, episode, perform_output, until)
         if result is None:
             return episode_id
         _, stitch_output = result
@@ -418,7 +451,7 @@ def resume_from_fetch(
     session: Session, record: db.EpisodeRecord, episode: Episode, fetch_output: FetchOutput, until: str | None
 ) -> str:
     """fetch_output already in hand (the CLI's --from-articles): rank ->
-    outline -> script -> critique -> tts -> stitch."""
+    outline -> script -> critique -> perform -> tts -> stitch."""
     record.status = "running"
     session.add(record)
     session.commit()
@@ -430,11 +463,11 @@ def resume_from_fetch(
     if not _check_grounding(session, record, episode, rank_output):
         return episode.episode_id
 
-    critique_output = _run_outline_through_critique(session, record, episode, rank_output, until)
-    if critique_output is None:
+    perform_output = _run_outline_through_perform(session, record, episode, rank_output, until)
+    if perform_output is None:
         return episode.episode_id
 
-    result = _run_tts_and_stitch(session, record, episode, tts_script_output(critique_output), until)
+    result = _run_tts_and_stitch(session, record, episode, perform_output, until)
     if result is None:
         return episode.episode_id
     _, stitch_output = result
@@ -446,7 +479,7 @@ def resume_from_fetch(
 def resume_from_rank(
     session: Session, record: db.EpisodeRecord, episode: Episode, rank_output: RankOutput, until: str | None
 ) -> str:
-    """rank_output already in hand: outline -> script -> critique -> tts -> stitch."""
+    """rank_output already in hand: outline -> script -> critique -> perform -> tts -> stitch."""
     record.status = "running"
     session.add(record)
     session.commit()
@@ -455,11 +488,11 @@ def resume_from_rank(
     if not _check_grounding(session, record, episode, rank_output):
         return episode.episode_id
 
-    critique_output = _run_outline_through_critique(session, record, episode, rank_output, until)
-    if critique_output is None:
+    perform_output = _run_outline_through_perform(session, record, episode, rank_output, until)
+    if perform_output is None:
         return episode.episode_id
 
-    result = _run_tts_and_stitch(session, record, episode, tts_script_output(critique_output), until)
+    result = _run_tts_and_stitch(session, record, episode, perform_output, until)
     if result is None:
         return episode.episode_id
     _, stitch_output = result
@@ -476,7 +509,7 @@ def resume_from_outline(
     rank_output: RankOutput,
     until: str | None,
 ) -> str:
-    """outline_output already in hand: script -> critique -> tts -> stitch."""
+    """outline_output already in hand: script -> critique -> perform -> tts -> stitch."""
     record.status = "running"
     session.add(record)
     session.commit()
@@ -490,7 +523,11 @@ def resume_from_outline(
     if critique_output is None:
         return episode.episode_id
 
-    result = _run_tts_and_stitch(session, record, episode, tts_script_output(critique_output), until)
+    perform_output = _step_perform(session, record, episode, critique_output, rank_output.selected, until)
+    if perform_output is None:
+        return episode.episode_id
+
+    result = _run_tts_and_stitch(session, record, episode, perform_output, until)
     if result is None:
         return episode.episode_id
     _, stitch_output = result
@@ -508,7 +545,7 @@ def resume_from_script(
     outline_output: OutlineOutput,
     until: str | None,
 ) -> str:
-    """script_output already in hand: critique -> tts -> stitch."""
+    """script_output already in hand: critique -> perform -> tts -> stitch."""
     record.status = "running"
     session.add(record)
     session.commit()
@@ -518,7 +555,11 @@ def resume_from_script(
     if critique_output is None:
         return episode.episode_id
 
-    result = _run_tts_and_stitch(session, record, episode, tts_script_output(critique_output), until)
+    perform_output = _step_perform(session, record, episode, critique_output, rank_output.selected, until)
+    if perform_output is None:
+        return episode.episode_id
+
+    result = _run_tts_and_stitch(session, record, episode, perform_output, until)
     if result is None:
         return episode.episode_id
     _, stitch_output = result
@@ -528,15 +569,44 @@ def resume_from_script(
 
 
 def resume_from_critique(
-    session: Session, record: db.EpisodeRecord, episode: Episode, critique_output: CritiqueOutput, until: str | None
+    session: Session,
+    record: db.EpisodeRecord,
+    episode: Episode,
+    critique_output: CritiqueOutput,
+    articles: list[Article],
+    until: str | None,
 ) -> str:
-    """critique_output already in hand: tts -> stitch."""
+    """critique_output already in hand: perform -> tts -> stitch. `articles`
+    (the episode's selected/ranked articles) is needed by perform_stage to
+    re-check grounding on the performed text."""
     record.status = "running"
     session.add(record)
     session.commit()
     start = time.monotonic()
 
-    result = _run_tts_and_stitch(session, record, episode, tts_script_output(critique_output), until)
+    perform_output = _step_perform(session, record, episode, critique_output, articles, until)
+    if perform_output is None:
+        return episode.episode_id
+
+    result = _run_tts_and_stitch(session, record, episode, perform_output, until)
+    if result is None:
+        return episode.episode_id
+    _, stitch_output = result
+
+    _finish(session, record, episode.episode_id, start, stitch_output)
+    return episode.episode_id
+
+
+def resume_from_performance(
+    session: Session, record: db.EpisodeRecord, episode: Episode, perform_output: PerformOutput, until: str | None
+) -> str:
+    """perform_output already in hand: tts -> stitch."""
+    record.status = "running"
+    session.add(record)
+    session.commit()
+    start = time.monotonic()
+
+    result = _run_tts_and_stitch(session, record, episode, perform_output, until)
     if result is None:
         return episode.episode_id
     _, stitch_output = result

@@ -1,0 +1,12 @@
+services:
+  podcast:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - podcast-data:/app/data
+
+volumes:
+  podcast-data:

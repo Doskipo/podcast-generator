@@ -265,6 +265,27 @@ def test_render_outline_story_includes_primer_instruction_only_when_is_primer():
     assert "not news" not in rendered_news
 
 
+def test_render_listener_includes_facts_when_present():
+    with_facts = script_module._render_listener(Listener(name="Eudald", facts=["plays piano", "trains calisthenics"]))
+    assert "Eudald" in with_facts
+    assert "plays piano" in with_facts
+    assert "trains calisthenics" in with_facts
+
+    no_facts = script_module._render_listener(Listener(name="Eudald"))
+    assert no_facts == "Listener: Eudald."
+
+
+def test_build_prompts_includes_listener_facts(tmp_path):
+    profile = _profile()
+    profile.podcast.listener = Listener(name="Eudald", facts=["plays piano; likes jazzy progressions"])
+    outline_output = _outline_output("ep1", "abcd1234")
+    articles = [_article("abcd1234")]
+
+    system_prompt, _user_prompt = script_module._build_prompts(profile, outline_output.outline, articles)
+
+    assert "plays piano; likes jazzy progressions" in system_prompt
+
+
 def test_build_prompts_states_cold_open_identification_rule(tmp_path):
     profile = _profile()
     outline_output = _outline_output("ep1", "abcd1234")

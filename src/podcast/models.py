@@ -80,6 +80,15 @@ class Host(BaseModel):
 
 class Listener(BaseModel):
     name: str
+    # Concrete, user-authored facts about the listener (hobbies, current
+    # projects, what they're grinding at) — e.g. "plays piano; likes jazzy /
+    # alternative-pop progressions". Replaces the old bare-name-only hook:
+    # script_stage renders these into the prompt so a tangent or aside can
+    # reference something real about the listener instead of the model
+    # having nothing to work with but their name. Still nothing to invent
+    # beyond what's listed here — see script.py's "never invent hobbies,
+    # opinions..." hard rule.
+    facts: list[str] = Field(default_factory=list)
 
 
 class RecurringBit(BaseModel):
@@ -497,6 +506,75 @@ class CritiqueOutput(BaseModel):
     total_words: int  # word count of revised_script (cold_open + segments + outro)
     over_budget_segments: list[SegmentBudgetFlag]
     terse_hosts: list[HostBrevityFlag]
+    usage: list[TokenUsage] = Field(default_factory=list)
+
+
+class PerformedLine(BaseModel):
+    """One line rewritten for voice performance — same content as its source
+    Line, restructured for how it should sound spoken. `delivery` here is a
+    free-text description of the line's ARC ("starts flat, rises into the
+    joke", "warm, slowing at the end", "quick, cutting in") — NOT a bracket-
+    tag keyword like Line.delivery. Any v3 audio tag ("[laughs]", "[sighs]")
+    belongs inline inside `text` at the point the emotion actually shifts
+    (see docs/decisions.md, "perform stage") — tts_stage sends `text` as-is,
+    with no bracket-prefixing step."""
+
+    speaker: str
+    text: str
+    pause_ms: int | None = None
+    delivery: str | None = None  # the delivery arc, e.g. "warm, slowing at the end"
+
+
+class PerformedSegment(BaseModel):
+    """Mirrors Segment, but headline/source_ids are never trusted from the
+    performance-writing model — perform_stage overwrites both from the
+    matching original segment by index after generation, so grounding stays
+    structural rather than re-derived from a rewritten segment."""
+
+    headline: str
+    source_ids: list[str]
+    lines: list[PerformedLine]
+
+
+class Performance(BaseModel):
+    title: str
+    cold_open: list[PerformedLine]
+    segments: list[PerformedSegment]
+    outro: list[PerformedLine]
+
+
+class FactChangeFlag(BaseModel):
+    """One line the perform stage's fact-check pass judged to have changed
+    meaning/facts during performance rewriting, not just phrasing.
+    `segment_index` is the segment's position in the original revised_script
+    (None means the outro). Informational, like CritiqueOutput's
+    over_budget_segments/terse_hosts — reported, not auto-corrected."""
+
+    segment_index: int | None
+    speaker: str
+    original_text: str
+    performed_text: str
+    reason: str  # one line: what changed and why it matters
+
+
+class FactCheck(BaseModel):
+    """Structured-output wrapper for the fact-check call — same convention
+    as Critique/ScoreBatch wrapping a list for chat.completions.parse."""
+
+    flags: list[FactChangeFlag]
+
+
+class PerformOutput(BaseModel):
+    """Typed output of the perform stage, persisted as performance.json.
+    tts_stage reads this instead of script.json/critique.json from here on
+    — see docs/decisions.md ("perform stage")."""
+
+    episode_id: str
+    generated_at: datetime
+    model: str  # the performance-writing call's model (profile.llm.script_model)
+    fact_check_model: str  # the fact-check call's model (profile.llm.model)
+    performance: Performance
+    fact_flags: list[FactChangeFlag]
     usage: list[TokenUsage] = Field(default_factory=list)
 
 

@@ -17,13 +17,13 @@ from podcast.models import (
     Host,
     HostVoiceSettings,
     Interest,
-    Line,
     Listener,
+    Performance,
+    PerformedLine,
+    PerformedSegment,
+    PerformOutput,
     PodcastSettings,
     Profile,
-    Script,
-    ScriptOutput,
-    Segment,
     Style,
 )
 from podcast.stages import tts as tts_module
@@ -62,23 +62,30 @@ def _episode(profile: Profile, episode_id: str = "ep1") -> Episode:
     return Episode(episode_id=episode_id, created_at=datetime.now(timezone.utc), profile=profile)
 
 
-def _script_output(episode_id: str) -> ScriptOutput:
-    script = Script(
+def _perform_output(episode_id: str) -> PerformOutput:
+    performance = Performance(
         title="Test Episode",
-        cold_open=[Line(speaker="Nova", text="Welcome back!")],
+        cold_open=[PerformedLine(speaker="Nova", text="Welcome back!")],
         segments=[
-            Segment(
+            PerformedSegment(
                 headline="Something happened",
                 source_ids=[],
                 lines=[
-                    Line(speaker="Nova", text="Here's the story."),
-                    Line(speaker="Max", text="Tell me more."),
+                    PerformedLine(speaker="Nova", text="Here's the story."),
+                    PerformedLine(speaker="Max", text="Tell me more."),
                 ],
             )
         ],
-        outro=[Line(speaker="Max", text="See you next time.")],
+        outro=[PerformedLine(speaker="Max", text="See you next time.")],
     )
-    return ScriptOutput(episode_id=episode_id, generated_at=datetime.now(timezone.utc), model="gpt-5", script=script)
+    return PerformOutput(
+        episode_id=episode_id,
+        generated_at=datetime.now(timezone.utc),
+        model="gpt-5",
+        fact_check_model="gpt-5-mini",
+        performance=performance,
+        fact_flags=[],
+    )
 
 
 def _patch_episode_dir(monkeypatch, tmp_path: Path) -> None:
@@ -119,7 +126,7 @@ def _combined_clip_response(line_count: int) -> _FakeDialogueResponse:
 def test_tts_stage_dialogue_mode_splits_audio_per_line(tmp_path, monkeypatch):
     profile = _profile()
     episode = _episode(profile)
-    script_output = _script_output(episode.episode_id)
+    perform_output = _perform_output(episode.episode_id)
 
     captured_inputs = []
 
@@ -130,7 +137,7 @@ def test_tts_stage_dialogue_mode_splits_audio_per_line(tmp_path, monkeypatch):
     monkeypatch.setattr(tts_module, "_dialogue_convert", fake_dialogue_convert)
     _patch_episode_dir(monkeypatch, tmp_path)
 
-    output = tts_module.tts_stage(episode, script_output, client=object())
+    output = tts_module.tts_stage(episode, perform_output, client=object())
 
     assert output.synthesis_mode == "dialogue"
     assert len(output.lines) == 4
@@ -155,7 +162,7 @@ def test_tts_stage_dialogue_mode_splits_audio_per_line(tmp_path, monkeypatch):
 def test_tts_stage_falls_back_to_per_line_when_dialogue_fails(tmp_path, monkeypatch):
     profile = _profile()
     episode = _episode(profile)
-    script_output = _script_output(episode.episode_id)
+    perform_output = _perform_output(episode.episode_id)
 
     def failing_dialogue_convert(client, inputs, model_id):
         raise RuntimeError("dialogue endpoint unavailable")
@@ -170,7 +177,7 @@ def test_tts_stage_falls_back_to_per_line_when_dialogue_fails(tmp_path, monkeypa
     monkeypatch.setattr(tts_module, "_synthesize", fake_synthesize)
     _patch_episode_dir(monkeypatch, tmp_path)
 
-    output = tts_module.tts_stage(episode, script_output, client=object())
+    output = tts_module.tts_stage(episode, perform_output, client=object())
 
     assert output.synthesis_mode == "per_line"
     assert len(calls) == 4
@@ -189,7 +196,7 @@ def test_tts_stage_per_line_fallback_applies_host_voice_settings(tmp_path, monke
         "Nova", "voice-nova", HostVoiceSettings(stability=0.3, style=0.6, similarity=0.75)
     )
     episode = _episode(profile)
-    script_output = _script_output(episode.episode_id)
+    perform_output = _perform_output(episode.episode_id)
 
     captured_settings = []
 
@@ -204,7 +211,7 @@ def test_tts_stage_per_line_fallback_applies_host_voice_settings(tmp_path, monke
     monkeypatch.setattr(tts_module, "_synthesize", fake_synthesize)
     _patch_episode_dir(monkeypatch, tmp_path)
 
-    tts_module.tts_stage(episode, script_output, client=object())
+    tts_module.tts_stage(episode, perform_output, client=object())
 
     nova_calls = [s for voice_id, s in captured_settings if voice_id == "voice-nova"]
     max_calls = [s for voice_id, s in captured_settings if voice_id == "voice-max"]
@@ -215,7 +222,7 @@ def test_tts_stage_per_line_fallback_applies_host_voice_settings(tmp_path, monke
 def test_tts_stage_skips_existing_files_in_per_line_mode(tmp_path, monkeypatch):
     profile = _profile()
     episode = _episode(profile)
-    script_output = _script_output(episode.episode_id)
+    perform_output = _perform_output(episode.episode_id)
 
     _patch_episode_dir(monkeypatch, tmp_path)
 
@@ -223,8 +230,8 @@ def test_tts_stage_skips_existing_files_in_per_line_mode(tmp_path, monkeypatch):
     # as if a previous run already synthesized this exact line
     segments_dir = tmp_path / "episodes" / episode.episode_id / "segments"
     segments_dir.mkdir(parents=True, exist_ok=True)
-    first_line = script_output.script.cold_open[0]
-    expected_key = tts_module._content_key(tts_module._tagged_text(first_line))
+    first_line = perform_output.performance.cold_open[0]
+    expected_key = tts_module._content_key(first_line.text)
     existing_file = segments_dir / f"000_Nova_{expected_key}.mp3"
     existing_file.write_bytes(b"EXISTING-AUDIO")
 
@@ -240,7 +247,7 @@ def test_tts_stage_skips_existing_files_in_per_line_mode(tmp_path, monkeypatch):
     monkeypatch.setattr(tts_module, "_dialogue_convert", failing_dialogue_convert)
     monkeypatch.setattr(tts_module, "_synthesize", fake_synthesize)
 
-    output = tts_module.tts_stage(episode, script_output, client=object())
+    output = tts_module.tts_stage(episode, perform_output, client=object())
 
     # the pre-existing file was not touched, and synthesis wasn't called for it
     assert existing_file.read_bytes() == b"EXISTING-AUDIO"
@@ -257,7 +264,7 @@ def test_tts_stage_does_not_reuse_stale_file_when_line_text_changes(tmp_path, mo
     entirely, so it's simply not found and gets resynthesized."""
     profile = _profile()
     episode = _episode(profile)
-    script_output = _script_output(episode.episode_id)
+    perform_output = _perform_output(episode.episode_id)
 
     _patch_episode_dir(monkeypatch, tmp_path)
 
@@ -279,7 +286,7 @@ def test_tts_stage_does_not_reuse_stale_file_when_line_text_changes(tmp_path, mo
     monkeypatch.setattr(tts_module, "_dialogue_convert", failing_dialogue_convert)
     monkeypatch.setattr(tts_module, "_synthesize", fake_synthesize)
 
-    output = tts_module.tts_stage(episode, script_output, client=object())
+    output = tts_module.tts_stage(episode, perform_output, client=object())
 
     # the stale file is untouched and unused; line 0 was freshly synthesized
     assert stale_file.read_bytes() == b"STALE-AUDIO-FROM-A-DIFFERENT-SCRIPT"
@@ -293,12 +300,12 @@ def test_tts_stage_missing_host_voice_raises(tmp_path, monkeypatch):
     profile = _profile()
     profile.podcast.hosts = [_host("Nova", "voice-nova")]  # Max has no matching host
     episode = _episode(profile)
-    script_output = _script_output(episode.episode_id)
+    perform_output = _perform_output(episode.episode_id)
 
     _patch_episode_dir(monkeypatch, tmp_path)
 
     with pytest.raises(ValueError, match="Max"):
-        tts_module.tts_stage(episode, script_output, client=object())
+        tts_module.tts_stage(episode, perform_output, client=object())
 
 
 def test_tts_stage_requires_elevenlabs_api_key(tmp_path, monkeypatch):
@@ -307,28 +314,44 @@ def test_tts_stage_requires_elevenlabs_api_key(tmp_path, monkeypatch):
 
     profile = _profile()
     episode = _episode(profile)
-    script_output = _script_output(episode.episode_id)
+    perform_output = _perform_output(episode.episode_id)
 
     with pytest.raises(RuntimeError, match="ELEVENLABS_API_KEY"):
-        tts_module.tts_stage(episode, script_output)
+        tts_module.tts_stage(episode, perform_output)
 
 
-def test_tagged_text_prefixes_delivery():
-    line_with_delivery = Line(speaker="Nova", text="No way.", delivery="laughs")
-    line_plain = Line(speaker="Nova", text="No way.")
-    assert tts_module._tagged_text(line_with_delivery) == "[laughs] No way."
-    assert tts_module._tagged_text(line_plain) == "No way."
+def test_tts_stage_sends_text_verbatim_without_bracket_prefix(tmp_path, monkeypatch):
+    """The perform stage now writes any v3 audio tag inline into the line's
+    own text (e.g. "Well... [laughs] no way.") — tts_stage must send that
+    text through unchanged, with no bracket-prefixing step of its own."""
+    profile = _profile()
+    episode = _episode(profile)
+    perform_output = _perform_output(episode.episode_id)
+    perform_output.performance.cold_open[0] = PerformedLine(
+        speaker="Nova", text="Well... [laughs] no way.", delivery="starts flat, rises into the joke"
+    )
 
+    def failing_dialogue_convert(client, inputs, model_id):
+        raise RuntimeError("dialogue endpoint unavailable")
 
-def test_tagged_text_avoids_double_tagging(tmp_path, monkeypatch):
-    # seen in a real run: the writer sometimes opens a line with its own
-    # bracketed tag AND sets delivery to the same thing — must not stack.
-    line = Line(speaker="Nova", text="[laughs] There it is.", delivery="laughs")
-    assert tts_module._tagged_text(line) == "[laughs] There it is."
+    calls: list[str] = []
+
+    def fake_synthesize(client, voice_id, model_id, text, voice_settings=None):
+        calls.append(text)
+        return FAKE_AUDIO
+
+    monkeypatch.setattr(tts_module, "_dialogue_convert", failing_dialogue_convert)
+    monkeypatch.setattr(tts_module, "_synthesize", fake_synthesize)
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    output = tts_module.tts_stage(episode, perform_output, client=object())
+
+    assert calls[0] == "Well... [laughs] no way."
+    assert output.lines[0].characters == len("Well... [laughs] no way.")
 
 
 def test_chunk_lines_respects_char_limit():
-    lines = [Line(speaker="Nova", text="x" * 10) for _ in range(5)]
+    lines = [PerformedLine(speaker="Nova", text="x" * 10) for _ in range(5)]
     chunks = tts_module._chunk_lines(lines, char_limit=25)
     # 10 chars each -> 2 lines (20 chars) fit, a 3rd would exceed 25
     assert [len(c) for c in chunks] == [2, 2, 1]

@@ -8,7 +8,7 @@ import MockedBadge from '../components/dashboard/MockedBadge.jsx'
 import RecentFailuresTable from '../components/dashboard/RecentFailuresTable.jsx'
 import TopicDistributionChart from '../components/dashboard/TopicDistributionChart.jsx'
 
-const STAGE_ORDER = ['rank', 'outline', 'script', 'critique', 'tts']
+const STAGE_ORDER = ['rank', 'outline', 'script', 'critique', 'perform', 'tts']
 
 // Pivots [{stage, provider, cost_usd}, ...] into recharts rows
 // [{stage, openai, elevenlabs}, ...], in pipeline order.

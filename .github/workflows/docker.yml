@@ -1,0 +1,87 @@
+name: Docker build & smoke test
+
+# Builds the image exactly as docker-compose.yml would, runs it with dummy
+# API keys (real ones are only needed to actually run pipeline stages, not
+# to boot the API and serve / and /docs), and checks both respond. See
+# docs/decisions.md ("Packaging") for why one container / one image.
+on:
+  push:
+    branches: [master]
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - docker-compose.yml
+      - pyproject.toml
+      - uv.lock
+      - src/**
+      - web/**
+      - .github/workflows/docker.yml
+  pull_request:
+    branches: [master]
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - docker-compose.yml
+      - pyproject.toml
+      - uv.lock
+      - src/**
+      - web/**
+      - .github/workflows/docker.yml
+  workflow_dispatch: {}
+
+jobs:
+  build-and-smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build image
+        run: docker build -t podcast-generator .
+
+      - name: Report image size
+        run: docker images podcast-generator
+
+      - name: Run container with dummy API keys
+        run: |
+          cat > .env.ci <<'EOF'
+          OPENAI_API_KEY=dummy
+          ELEVENLABS_API_KEY=dummy
+          EOF
+          docker run -d --name podcast-verify -p 8000:8000 --env-file .env.ci podcast-generator
+
+      - name: Wait for the app to come up
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8000/docs > /dev/null; then
+              echo "up after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "app did not come up in time" >&2
+          docker logs podcast-verify
+          exit 1
+
+      - name: Check / serves the built UI
+        run: |
+          status=$(curl -s -o body.html -w "%{http_code}" http://localhost:8000/)
+          echo "status: $status"
+          test "$status" = "200"
+          grep -qi "<div id=\"root\"" body.html  # Vite's SPA mount point, not an error page
+
+      - name: Check /docs serves the API docs
+        run: |
+          status=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/docs)
+          echo "status: $status"
+          test "$status" = "200"
+
+      - name: Container logs (always, for debugging)
+        if: always()
+        run: docker logs podcast-verify || true
+
+      - name: Clean up
+        if: always()
+        run: |
+          docker stop podcast-verify || true
+          docker rm podcast-verify || true
+          rm -f .env.ci
