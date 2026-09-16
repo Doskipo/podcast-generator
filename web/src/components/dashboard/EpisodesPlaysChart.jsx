@@ -9,13 +9,13 @@ function ChartTooltip({ active, payload, label }) {
   if (!active || !payload?.length) return null
   const mocked = payload[0]?.payload?.mocked
   return (
-    <div className="rounded-md border border-slate-200 bg-white px-3 py-2 text-xs shadow-lg">
-      <div className="mb-1 font-medium text-slate-900">
+    <div className="rounded-md border border-ink/10 bg-surface px-3 py-2 text-xs shadow-lg">
+      <div className="mb-1 font-medium text-ink">
         {formatDay(label)}
-        {mocked && <span className="ml-1 text-violet-600">(mocked)</span>}
+        {mocked && <span className="ml-1 text-accent">(mocked)</span>}
       </div>
       {payload.map((entry) => (
-        <div key={entry.dataKey} className="flex items-center gap-1.5 text-slate-600">
+        <div key={entry.dataKey} className="flex items-center gap-1.5 text-ink/70">
           <span className="inline-block h-2 w-2 rounded-full" style={{ background: entry.color }} />
           {entry.name}: {entry.value}
         </div>
@@ -37,9 +37,9 @@ export default function EpisodesPlaysChart({ data }) {
             <ReferenceArea
               x1={mockedRange[0]}
               x2={mockedRange[1]}
-              fill="#8b5cf6"
+              fill={CHART.ink}
               fillOpacity={0.06}
-              label={{ value: 'Mocked', position: 'insideTopLeft', fill: '#7c3aed', fontSize: 10 }}
+              label={{ value: 'Mocked', position: 'insideTopLeft', fill: CHART.inkMuted, fontSize: 10 }}
             />
           )}
           <XAxis
@@ -59,12 +59,12 @@ export default function EpisodesPlaysChart({ data }) {
             allowDecimals={false}
           />
           <Tooltip content={<ChartTooltip />} />
-          <Legend wrapperStyle={{ fontSize: 12, color: CHART.inkSecondary }} />
+          <Legend wrapperStyle={{ fontSize: 12, color: CHART.ink }} />
           <Line
             type="monotone"
             dataKey="episodes_created"
             name="Episodes"
-            stroke={SERIES.blue}
+            stroke={SERIES.strong}
             strokeWidth={2}
             dot={false}
             isAnimationActive={false}
@@ -73,7 +73,7 @@ export default function EpisodesPlaysChart({ data }) {
             type="monotone"
             dataKey="plays"
             name="Plays"
-            stroke={SERIES.orange}
+            stroke={SERIES.medium}
             strokeWidth={2}
             dot={false}
             isAnimationActive={false}
@@ -82,8 +82,9 @@ export default function EpisodesPlaysChart({ data }) {
             type="monotone"
             dataKey="completions"
             name="Completions"
-            stroke={SERIES.aqua}
+            stroke={SERIES.soft}
             strokeWidth={2}
+            strokeDasharray="4 3"
             dot={false}
             isAnimationActive={false}
           />

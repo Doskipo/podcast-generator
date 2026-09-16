@@ -44,7 +44,7 @@ def test_get_profile_404_before_any_put(tmp_path, monkeypatch):
     _configure_test_db(monkeypatch, tmp_path)
 
     with TestClient(app) as client:
-        resp = client.get("/profile")
+        resp = client.get("/api/profile")
     assert resp.status_code == 404
 
 
@@ -54,11 +54,11 @@ def test_put_then_get_profile_round_trips(tmp_path, monkeypatch):
     payload = _profile("Roundtrip").model_dump(mode="json")
 
     with TestClient(app) as client:
-        put_resp = client.put("/profile", json=payload)
+        put_resp = client.put("/api/profile", json=payload)
         assert put_resp.status_code == 200
         assert put_resp.json()["name"] == "Roundtrip"
 
-        get_resp = client.get("/profile")
+        get_resp = client.get("/api/profile")
         assert get_resp.status_code == 200
         assert get_resp.json()["name"] == "Roundtrip"
 
@@ -67,10 +67,10 @@ def test_put_profile_twice_updates_the_same_row(tmp_path, monkeypatch):
     _configure_test_db(monkeypatch, tmp_path)
 
     with TestClient(app) as client:
-        client.put("/profile", json=_profile("First").model_dump(mode="json"))
-        client.put("/profile", json=_profile("Second").model_dump(mode="json"))
+        client.put("/api/profile", json=_profile("First").model_dump(mode="json"))
+        client.put("/api/profile", json=_profile("Second").model_dump(mode="json"))
 
-        get_resp = client.get("/profile")
+        get_resp = client.get("/api/profile")
         assert get_resp.json()["name"] == "Second"
 
     # Sanity: exactly one row in the table regardless of how many PUTs happened.
@@ -85,14 +85,14 @@ def test_put_profile_with_wrong_host_count_is_422(tmp_path, monkeypatch):
     payload["podcast"]["hosts"] = payload["podcast"]["hosts"][:1]
 
     with TestClient(app) as client:
-        resp = client.put("/profile", json=payload)
+        resp = client.put("/api/profile", json=payload)
 
     assert resp.status_code == 422
     assert "exactly two hosts" in resp.text
 
     # Rejected — nothing was saved.
     with TestClient(app) as client:
-        assert client.get("/profile").status_code == 404
+        assert client.get("/api/profile").status_code == 404
 
 
 def test_put_profile_with_blank_voice_id_is_422(tmp_path, monkeypatch):
@@ -101,7 +101,7 @@ def test_put_profile_with_blank_voice_id_is_422(tmp_path, monkeypatch):
     payload["podcast"]["hosts"][0]["voice_id"] = "  "
 
     with TestClient(app) as client:
-        resp = client.put("/profile", json=payload)
+        resp = client.put("/api/profile", json=payload)
 
     assert resp.status_code == 422
     assert "voice_id" in resp.text
@@ -114,7 +114,7 @@ def test_app_startup_seeds_profile_from_podcast_profile_path_env_var(tmp_path, m
     monkeypatch.setenv("PODCAST_PROFILE_PATH", str(profile_path))
 
     with TestClient(app) as client:
-        resp = client.get("/profile")
+        resp = client.get("/api/profile")
 
     assert resp.status_code == 200
     assert resp.json()["name"] == "Seeded On Startup"
@@ -130,6 +130,6 @@ def test_app_startup_does_not_reseed_over_an_existing_profile(tmp_path, monkeypa
         service.upsert_profile(_profile("Already saved"), session)
 
     with TestClient(app) as client:
-        resp = client.get("/profile")
+        resp = client.get("/api/profile")
 
     assert resp.json()["name"] == "Already saved"

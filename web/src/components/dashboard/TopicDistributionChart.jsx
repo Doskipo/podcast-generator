@@ -20,7 +20,7 @@ export default function TopicDistributionChart({ data }) {
             dataKey="interest"
             width={140}
             stroke={CHART.axis}
-            tick={{ fill: CHART.inkSecondary, fontSize: 11 }}
+            tick={{ fill: CHART.ink, fontSize: 11 }}
             tickLine={false}
             axisLine={false}
           />
@@ -28,7 +28,7 @@ export default function TopicDistributionChart({ data }) {
             formatter={(value) => [value, 'Episodes covering this']}
             contentStyle={{ fontSize: 12, borderRadius: 6, borderColor: CHART.grid }}
           />
-          <Bar dataKey="count" name="Episodes covering this" fill={SERIES.blue} radius={[0, 4, 4, 0]} isAnimationActive={false} />
+          <Bar dataKey="count" name="Episodes covering this" fill={SERIES.strong} radius={[0, 4, 4, 0]} isAnimationActive={false} />
         </BarChart>
       </ResponsiveContainer>
     </div>

@@ -1,1 +1,22 @@
 @import "tailwindcss";
+
+/* One palette, four colours, used everywhere — nav, cards, buttons, badges,
+   AND charts (see lib/chartColors.js, which reads these same variables).
+   No other hex colour should appear anywhere in this app. Registered via
+   @theme so Tailwind generates bg-bg/bg-surface/text-ink/bg-accent (etc,
+   including opacity modifiers like bg-accent/10) for free. See
+   docs/ui.md ("Palette"). */
+@theme {
+  --color-bg: #121317; /* dark app background */
+  --color-surface: #f8f7f4; /* light content-card background */
+  --color-ink: #1b1c20; /* dark text, on surface; also one of two speaker colours */
+  --color-accent: #6c5ce7; /* single brand accent: primary actions, active nav, links, the other speaker colour */
+}
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  background: var(--color-bg);
+}

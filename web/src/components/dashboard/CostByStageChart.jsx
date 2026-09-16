@@ -30,7 +30,7 @@ export default function CostByStageChart({ data }) {
             labelFormatter={(stage) => STAGE_LABEL[stage] ?? stage}
             contentStyle={{ fontSize: 12, borderRadius: 6, borderColor: CHART.grid }}
           />
-          <Legend wrapperStyle={{ fontSize: 12, color: CHART.inkSecondary }} formatter={(name) => PROVIDER_LABEL[name] ?? name} />
+          <Legend wrapperStyle={{ fontSize: 12, color: CHART.ink }} formatter={(name) => PROVIDER_LABEL[name] ?? name} />
           <Bar dataKey="openai" name="openai" stackId="cost" fill={PROVIDER_COLOR.openai} isAnimationActive={false} />
           <Bar
             dataKey="elevenlabs"

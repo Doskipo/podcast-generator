@@ -68,7 +68,7 @@ def _patch_episode_dir(monkeypatch, tmp_path: Path) -> None:
 
 
 def _seed_profile(client: TestClient) -> None:
-    resp = client.put("/profile", json=_profile().model_dump(mode="json"))
+    resp = client.put("/api/profile", json=_profile().model_dump(mode="json"))
     assert resp.status_code == 200
 
 
@@ -130,7 +130,7 @@ def test_post_episodes_returns_pending_immediately(tmp_path, monkeypatch):
 
     with TestClient(app) as client:
         _seed_profile(client)
-        resp = client.post("/episodes", json={})
+        resp = client.post("/api/episodes", json={})
 
     assert resp.status_code == 202
     body = resp.json()
@@ -143,7 +143,7 @@ def test_post_episodes_without_a_profile_is_404(tmp_path, monkeypatch):
     _patch_episode_dir(monkeypatch, tmp_path)
 
     with TestClient(app) as client:
-        resp = client.post("/episodes", json={})
+        resp = client.post("/api/episodes", json={})
     assert resp.status_code == 404
 
 
@@ -154,14 +154,38 @@ def test_get_episodes_lists_created_episode(tmp_path, monkeypatch):
 
     with TestClient(app) as client:
         _seed_profile(client)
-        create_resp = client.post("/episodes", json={})
+        create_resp = client.post("/api/episodes", json={})
         episode_id = create_resp.json()["episode_id"]
 
-        list_resp = client.get("/episodes")
+        list_resp = client.get("/api/episodes")
 
     assert list_resp.status_code == 200
-    ids = [e["episode_id"] for e in list_resp.json()]
+    rows = list_resp.json()
+    ids = [e["episode_id"] for e in rows]
     assert episode_id in ids
+    # title comes from the script (critique.json's revised_script here), not
+    # the bare episode_id — see routes_episodes._load_title
+    listed = next(e for e in rows if e["episode_id"] == episode_id)
+    assert listed["title"] == "t"
+
+
+def test_get_episodes_title_is_none_before_a_script_exists(tmp_path, monkeypatch):
+    _configure_test_db(monkeypatch, tmp_path)
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    with TestClient(app) as client:
+        _seed_profile(client)
+        # Seeded directly (no background pipeline run) — a pending episode
+        # with no script.json/critique.json on disk yet.
+        with db.session_scope() as session:
+            record = service.get_or_create_episode_record(session, "ep-pending", profile_id=1)
+            session.add(record)
+            session.commit()
+
+        list_resp = client.get("/api/episodes")
+
+    listed = next(e for e in list_resp.json() if e["episode_id"] == "ep-pending")
+    assert listed["title"] is None
 
 
 def test_get_episode_detail_has_script_and_show_notes_once_done(tmp_path, monkeypatch):
@@ -171,9 +195,9 @@ def test_get_episode_detail_has_script_and_show_notes_once_done(tmp_path, monkey
 
     with TestClient(app) as client:
         _seed_profile(client)
-        episode_id = client.post("/episodes", json={}).json()["episode_id"]
+        episode_id = client.post("/api/episodes", json={}).json()["episode_id"]
 
-        detail_resp = client.get(f"/episodes/{episode_id}")
+        detail_resp = client.get(f"/api/episodes/{episode_id}")
 
     assert detail_resp.status_code == 200
     detail = detail_resp.json()
@@ -187,7 +211,7 @@ def test_get_episode_detail_unknown_id_is_404(tmp_path, monkeypatch):
     _patch_episode_dir(monkeypatch, tmp_path)
 
     with TestClient(app) as client:
-        resp = client.get("/episodes/does-not-exist")
+        resp = client.get("/api/episodes/does-not-exist")
     assert resp.status_code == 404
 
 
@@ -198,9 +222,9 @@ def test_get_episode_audio_serves_the_file(tmp_path, monkeypatch):
 
     with TestClient(app) as client:
         _seed_profile(client)
-        episode_id = client.post("/episodes", json={}).json()["episode_id"]
+        episode_id = client.post("/api/episodes", json={}).json()["episode_id"]
 
-        audio_resp = client.get(f"/episodes/{episode_id}/audio")
+        audio_resp = client.get(f"/api/episodes/{episode_id}/audio")
 
     assert audio_resp.status_code == 200
     assert audio_resp.headers["content-type"] == "audio/mpeg"
@@ -218,9 +242,9 @@ def test_get_episode_audio_404_before_done(tmp_path, monkeypatch):
 
     with TestClient(app) as client:
         _seed_profile(client)
-        episode_id = client.post("/episodes", json={}).json()["episode_id"]
+        episode_id = client.post("/api/episodes", json={}).json()["episode_id"]
 
-        audio_resp = client.get(f"/episodes/{episode_id}/audio")
+        audio_resp = client.get(f"/api/episodes/{episode_id}/audio")
 
     assert audio_resp.status_code == 404
 
@@ -232,9 +256,9 @@ def test_post_episode_event_creates_an_event_record(tmp_path, monkeypatch):
 
     with TestClient(app) as client:
         _seed_profile(client)
-        episode_id = client.post("/episodes", json={}).json()["episode_id"]
+        episode_id = client.post("/api/episodes", json={}).json()["episode_id"]
 
-        event_resp = client.post(f"/episodes/{episode_id}/events", json={"type": "played", "metadata": {"pos_s": 0}})
+        event_resp = client.post(f"/api/episodes/{episode_id}/events", json={"type": "played", "metadata": {"pos_s": 0}})
 
     assert event_resp.status_code == 201
     body = event_resp.json()
@@ -251,7 +275,7 @@ def test_post_episode_event_unknown_episode_is_404(tmp_path, monkeypatch):
     _patch_episode_dir(monkeypatch, tmp_path)
 
     with TestClient(app) as client:
-        resp = client.post("/episodes/does-not-exist/events", json={"type": "played"})
+        resp = client.post("/api/episodes/does-not-exist/events", json={"type": "played"})
     assert resp.status_code == 404
 
 
@@ -275,10 +299,10 @@ def test_no_content_episode_is_a_non_error_state_with_the_empty_interests_listed
 
     with TestClient(app) as client:
         _seed_profile(client)
-        episode_id = client.post("/episodes", json={}).json()["episode_id"]
+        episode_id = client.post("/api/episodes", json={}).json()["episode_id"]
 
-        list_resp = client.get("/episodes")
-        detail_resp = client.get(f"/episodes/{episode_id}")
+        list_resp = client.get("/api/episodes")
+        detail_resp = client.get(f"/api/episodes/{episode_id}")
 
     episode_summary = next(e for e in list_resp.json() if e["episode_id"] == episode_id)
     assert episode_summary["status"] == "no_content"
@@ -293,5 +317,5 @@ def test_no_content_episode_is_a_non_error_state_with_the_empty_interests_listed
 
     # No audio to serve for a no_content episode — 404, not a crash.
     with TestClient(app) as client:
-        audio_resp = client.get(f"/episodes/{episode_id}/audio")
+        audio_resp = client.get(f"/api/episodes/{episode_id}/audio")
     assert audio_resp.status_code == 404

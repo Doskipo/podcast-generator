@@ -75,6 +75,25 @@ jobs:
           echo "status: $status"
           test "$status" = "200"
 
+      - name: Check a hard refresh on a SPA route serves the UI, not the API
+        # Regression check for the /episodes route collision (API's
+        # GET /episodes vs. the SPA's /episodes page) — see
+        # docs/decisions.md ("API routes under /api"). A direct
+        # navigation/hard-refresh on /episodes must hit the SPA fallback,
+        # not the JSON list endpoint (now at /api/episodes).
+        run: |
+          status=$(curl -s -o body.html -w "%{http_code}" http://localhost:8000/episodes)
+          echo "status: $status"
+          test "$status" = "200"
+          grep -qi "<div id=\"root\"" body.html
+
+      - name: Check /api/episodes still serves the API, not the UI
+        run: |
+          status=$(curl -s -o body.json -w "%{http_code}" http://localhost:8000/api/episodes)
+          echo "status: $status"
+          test "$status" = "200"
+          head -c1 body.json | grep -q "\["  # a JSON array, not HTML
+
       - name: Container logs (always, for debugging)
         if: always()
         run: docker logs podcast-verify || true

@@ -49,7 +49,7 @@ def test_metrics_summary_aggregates_done_and_failed_episodes(tmp_path, monkeypat
     _patch_episode_dir(monkeypatch, tmp_path)
 
     with TestClient(app) as client:
-        put_resp = client.put("/profile", json=_profile().model_dump(mode="json"))
+        put_resp = client.put("/api/profile", json=_profile().model_dump(mode="json"))
         profile_id = 1
         assert put_resp.status_code == 200
 
@@ -71,7 +71,7 @@ def test_metrics_summary_aggregates_done_and_failed_episodes(tmp_path, monkeypat
 
             session.commit()
 
-        resp = client.get("/metrics/summary")
+        resp = client.get("/api/metrics/summary")
 
     assert resp.status_code == 200
     body = resp.json()
@@ -99,7 +99,7 @@ def test_metrics_summary_defaults_to_real_episodes_and_toggle_switches_the_whole
     _patch_episode_dir(monkeypatch, tmp_path)
 
     with TestClient(app) as client:
-        put_resp = client.put("/profile", json=_profile().model_dump(mode="json"))
+        put_resp = client.put("/api/profile", json=_profile().model_dump(mode="json"))
         profile_id = 1
         assert put_resp.status_code == 200
 
@@ -117,8 +117,8 @@ def test_metrics_summary_defaults_to_real_episodes_and_toggle_switches_the_whole
 
             session.commit()
 
-        default_resp = client.get("/metrics/summary")
-        opted_in_resp = client.get("/metrics/summary?include_mocked=true")
+        default_resp = client.get("/api/metrics/summary")
+        opted_in_resp = client.get("/api/metrics/summary?include_mocked=true")
 
     assert default_resp.status_code == 200
     default_body = default_resp.json()
@@ -140,7 +140,7 @@ def test_metrics_summary_with_no_episodes(tmp_path, monkeypatch):
     _patch_episode_dir(monkeypatch, tmp_path)
 
     with TestClient(app) as client:
-        resp = client.get("/metrics/summary")
+        resp = client.get("/api/metrics/summary")
 
     assert resp.status_code == 200
     body = resp.json()

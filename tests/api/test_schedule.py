@@ -50,7 +50,7 @@ def test_schedule_next_404_before_any_profile(tmp_path, monkeypatch):
     _patch_episode_dir(monkeypatch, tmp_path)
 
     with TestClient(app) as client:
-        resp = client.get("/schedule/next")
+        resp = client.get("/api/schedule/next")
     assert resp.status_code == 404
 
 
@@ -59,8 +59,8 @@ def test_schedule_next_reflects_default_daily_07_00(tmp_path, monkeypatch):
     _patch_episode_dir(monkeypatch, tmp_path)
 
     with TestClient(app) as client:
-        client.put("/profile", json=_profile().model_dump(mode="json"))
-        resp = client.get("/schedule/next")
+        client.put("/api/profile", json=_profile().model_dump(mode="json"))
+        resp = client.get("/api/schedule/next")
 
     assert resp.status_code == 200
     body = resp.json()
@@ -75,11 +75,11 @@ def test_schedule_next_updates_after_put_profile_changes_cron(tmp_path, monkeypa
     _patch_episode_dir(monkeypatch, tmp_path)
 
     with TestClient(app) as client:
-        client.put("/profile", json=_profile("0 7 * * *").model_dump(mode="json"))
-        first = client.get("/schedule/next").json()
+        client.put("/api/profile", json=_profile("0 7 * * *").model_dump(mode="json"))
+        first = client.get("/api/schedule/next").json()
 
-        client.put("/profile", json=_profile("30 9 * * *").model_dump(mode="json"))
-        second = client.get("/schedule/next").json()
+        client.put("/api/profile", json=_profile("30 9 * * *").model_dump(mode="json"))
+        second = client.get("/api/schedule/next").json()
 
     assert first["cron"] == "0 7 * * *"
     assert second["cron"] == "30 9 * * *"

@@ -1,7 +1,7 @@
 const VARIANTS = {
-  primary: 'bg-slate-900 text-white hover:bg-slate-700 disabled:bg-slate-300',
-  secondary: 'bg-white text-slate-700 border border-slate-300 hover:bg-slate-50 disabled:text-slate-400',
-  danger: 'bg-white text-red-600 border border-red-200 hover:bg-red-50 disabled:text-slate-400',
+  primary: 'bg-accent text-surface hover:bg-accent/90 disabled:bg-ink/20',
+  secondary: 'bg-surface text-ink border border-ink/20 hover:bg-ink/5 disabled:text-ink/40',
+  danger: 'bg-surface text-ink border border-ink/20 hover:bg-ink/10 disabled:text-ink/40',
 }
 
 export default function Button({ variant = 'primary', className = '', ...props }) {

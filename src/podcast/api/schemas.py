@@ -23,6 +23,11 @@ class EpisodeCreateResponse(BaseModel):
 
 class EpisodeSummary(BaseModel):
     episode_id: str
+    # The script's own title (revised_script if critique has run, else
+    # script's) — None until the script stage has produced one (e.g. still
+    # pending, or failed before scripting). The UI falls back to episode_id
+    # when this is None.
+    title: str | None = None
     status: str  # pending | running | done | failed | no_content
     stage_reached: str | None
     created_at: datetime

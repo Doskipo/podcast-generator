@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { api } from '../api.js'
 import Button from './Button.jsx'
 import Field, { TextArea, TextInput } from './Field.jsx'
-import Slider from './Slider.jsx'
+import WeightChoice from './WeightChoice.jsx'
 
 function InterestRow({ interest, onChange, onRemove }) {
   const [suggesting, setSuggesting] = useState(false)
@@ -22,8 +22,8 @@ function InterestRow({ interest, onChange, onRemove }) {
   }
 
   return (
-    <div className="space-y-3 rounded-md border border-slate-200 p-3">
-      <div className="flex items-start justify-between gap-3">
+    <div className="space-y-3 rounded-md border border-ink/15 p-3">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <Field label="Topic" className="flex-1">
           <TextInput
             value={interest.topic}
@@ -31,19 +31,12 @@ function InterestRow({ interest, onChange, onRemove }) {
             placeholder="e.g. mechanistic interpretability"
           />
         </Field>
-        <Button variant="danger" type="button" onClick={onRemove} className="mt-6">
+        <Button variant="danger" type="button" onClick={onRemove} className="self-end sm:mt-6 sm:self-auto">
           Remove
         </Button>
       </div>
 
-      <Slider
-        label="Weight"
-        value={interest.weight}
-        min={0}
-        max={1}
-        step={0.05}
-        onChange={(weight) => onChange({ ...interest, weight })}
-      />
+      <WeightChoice label="Weight" value={interest.weight} onChange={(weight) => onChange({ ...interest, weight })} />
 
       <Field label="Description (optional)">
         <TextArea
@@ -57,13 +50,13 @@ function InterestRow({ interest, onChange, onRemove }) {
         <Button type="button" variant="secondary" onClick={handleSuggest} disabled={!interest.topic || suggesting}>
           {suggesting ? 'Suggesting…' : 'Suggest'}
         </Button>
-        {suggestError && <span className="text-xs text-red-600">{suggestError}</span>}
+        {suggestError && <span className="text-xs text-accent">{suggestError}</span>}
       </div>
 
       {interest.queries?.length > 0 && (
         <div className="flex flex-wrap gap-1.5">
           {interest.queries.map((q) => (
-            <span key={q} className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600">
+            <span key={q} className="rounded-full bg-ink/5 px-2 py-0.5 text-xs text-ink/70">
               {q}
             </span>
           ))}
@@ -83,11 +76,14 @@ export default function InterestEditor({ interests, onChange }) {
   }
 
   function add() {
-    onChange([...interests, { topic: '', weight: 0.5, description: null, feeds: [], queries: null }])
+    onChange([...interests, { topic: '', weight: 0.7, description: null, feeds: [], queries: null }])
   }
 
   return (
     <div className="space-y-3">
+      {interests.length === 0 && (
+        <p className="text-sm text-ink/55">No interests yet — add one below to tell the pipeline what to look for.</p>
+      )}
       {interests.map((interest, i) => (
         // eslint-disable-next-line react/no-array-index-key -- rows have no stable id until saved
         <InterestRow key={i} interest={interest} onChange={(next) => updateAt(i, next)} onRemove={() => removeAt(i)} />

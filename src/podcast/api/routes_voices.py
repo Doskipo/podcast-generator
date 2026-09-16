@@ -1,4 +1,4 @@
-"""GET /voices — the fixed selectable voice catalog for the settings UI."""
+"""GET /api/voices — the fixed selectable voice catalog for the settings UI."""
 
 from __future__ import annotations
 

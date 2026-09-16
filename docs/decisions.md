@@ -1516,6 +1516,36 @@ stays on the field's docstring.
   existing violet "some numbers include seeded demo data" banner now only shows in the
   `includeMocked` mode, since in real-only mode that's no longer true.
 
+## API routes under /api — 2026-09-16
+`GET /episodes` was both the API's "list episodes" endpoint and (via `App.jsx`'s React Router
+config) the SPA's `/episodes` page. FastAPI matches routes in registration order and the API
+router was registered before the SPA's catch-all fallback, so a hard refresh or direct navigation
+to `/episodes` always hit the API handler — the browser rendered raw JSON instead of the app. `/`
+and `/settings`/`/dashboard` happened not to collide with any API route, so this only ever showed
+up on `/episodes` specifically, easy to miss.
+
+- **Fix: every API router now mounts under `/api`** (`app.include_router(routes_x.router,
+  prefix="/api")` in `api/app.py`) — `GET /api/episodes`, `PUT /api/profile`,
+  `GET /api/metrics/summary`, `GET /api/schedule/next`, `POST /api/interests/suggest`,
+  `GET /api/voices`. The SPA's own path namespace (`/`, `/settings`, `/episodes`, `/dashboard`)
+  and the API's (`/api/...`) are now structurally disjoint — no amount of adding SPA routes or API
+  routes can collide again, which is a stronger guarantee than "the catch-all is registered last"
+  ever was.
+- **`/docs` stays at the root.** FastAPI's interactive docs (`docs_url`, default `/docs`) are
+  independent of router prefixes — they list whatever paths the included routers actually expose
+  (now the `/api/...` ones), but the docs UI itself is still served at `/docs`, unaffected by this
+  change.
+- **Frontend**: `web/src/api.js` prefixes every request with a single `const API = '/api'`;
+  `web/vite.config.js`'s dev-server proxy collapsed from a per-endpoint path list to one `/api`
+  proxy entry, which is also simpler to keep correct as endpoints are added.
+- **Tests**: every `TestClient` call in `tests/api/*.py` updated to the `/api/...` paths — this is
+  a route-shape change, not a behavior change, so no test assertions beyond the URLs themselves
+  needed touching.
+- **CI**: `.github/workflows/docker.yml` gained a direct regression check for the bug this fixes —
+  `curl` a hard-refresh-style `GET /episodes` and assert it returns the SPA's `<div id="root">`
+  HTML (not JSON), alongside a check that `GET /api/episodes` still returns a JSON array at its
+  new address.
+
 ## Future work.
 - Add **suggest topics from previous episodes** from the previous podcasts. So it generatos a topic 
 (or a bunch of topics) for a podcast for you.

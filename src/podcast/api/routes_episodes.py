@@ -1,6 +1,6 @@
-"""POST /episodes (triggers a background generation run), GET /episodes,
-GET /episodes/{id} (status + script + show notes), GET /episodes/{id}/audio,
-POST /episodes/{id}/events (dashboard playback events)."""
+"""POST /api/episodes (triggers a background generation run), GET /api/episodes,
+GET /api/episodes/{id} (status + script + show notes), GET /api/episodes/{id}/audio,
+POST /api/episodes/{id}/events (dashboard playback events)."""
 
 from __future__ import annotations
 
@@ -30,9 +30,25 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _load_title(episode_id: str) -> str | None:
+    """The script's own title, read cheaply off whichever of critique.json/
+    script.json exists — None before the script stage has run. Shared by
+    the list and detail endpoints (_to_summary) so the Episodes UI can show
+    a real title without a second fetch."""
+    dir_path = episode_dir(episode_id)
+    critique_path = dir_path / "critique.json"
+    if critique_path.exists():
+        return CritiqueOutput.model_validate_json(critique_path.read_text(encoding="utf-8")).revised_script.title
+    script_path = dir_path / "script.json"
+    if script_path.exists():
+        return ScriptOutput.model_validate_json(script_path.read_text(encoding="utf-8")).script.title
+    return None
+
+
 def _to_summary(record: db.EpisodeRecord) -> EpisodeSummary:
     return EpisodeSummary(
         episode_id=record.episode_id,
+        title=_load_title(record.episode_id),
         status=record.status,
         stage_reached=record.stage_reached,
         created_at=record.created_at,
@@ -86,11 +102,11 @@ def create_episode(
 ) -> EpisodeCreateResponse:
     profile_row = session.get(db.ProfileRecord, 1)
     if profile_row is None:
-        raise HTTPException(status_code=404, detail="no profile configured yet — PUT /profile first")
+        raise HTTPException(status_code=404, detail="no profile configured yet — PUT /api/profile first")
 
     profile = Profile.model_validate(profile_row.data)
     episode_id = new_episode_id()
-    # Created synchronously so it's immediately visible to GET /episodes,
+    # Created synchronously so it's immediately visible to GET /api/episodes,
     # before the background task has done anything.
     service.get_or_create_episode_record(session, episode_id, profile_row.id)
 

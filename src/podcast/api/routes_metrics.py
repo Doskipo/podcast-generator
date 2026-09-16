@@ -1,4 +1,4 @@
-"""GET /metrics/summary — aggregate counts/costs over the episodes table,
+"""GET /api/metrics/summary — aggregate counts/costs over the episodes table,
 extended with the richer dashboard breakdown from podcast.metrics."""
 
 from __future__ import annotations

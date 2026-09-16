@@ -62,12 +62,18 @@ app = FastAPI(title="podcast-generator API", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware, allow_origins=_DEV_ORIGINS, allow_methods=["*"], allow_headers=["*"], allow_credentials=True
 )
-app.include_router(routes_profile.router)
-app.include_router(routes_episodes.router)
-app.include_router(routes_metrics.router)
-app.include_router(routes_schedule.router)
-app.include_router(routes_interests.router)
-app.include_router(routes_voices.router)
+# Every API route lives under /api — the SPA owns the bare path namespace
+# (/episodes, /settings, /dashboard, ...) for React Router, and without this
+# prefix a client-side route can collide with a same-named API route (e.g.
+# GET /episodes was both "list episodes" and the Episodes page): a hard
+# refresh/direct navigation on the SPA route would hit the API handler
+# instead of index.html. See docs/decisions.md ("API routes under /api").
+app.include_router(routes_profile.router, prefix="/api")
+app.include_router(routes_episodes.router, prefix="/api")
+app.include_router(routes_metrics.router, prefix="/api")
+app.include_router(routes_schedule.router, prefix="/api")
+app.include_router(routes_interests.router, prefix="/api")
+app.include_router(routes_voices.router, prefix="/api")
 
 # Static SPA, registered LAST so it never shadows an API route above: FastAPI
 # matches routes in registration order, and the catch-all path parameter

@@ -55,7 +55,7 @@ def test_voices_returns_the_fixed_catalog(tmp_path, monkeypatch):
     _patch_episode_dir(monkeypatch, tmp_path)
 
     with TestClient(app) as client:
-        resp = client.get("/voices")
+        resp = client.get("/api/voices")
 
     assert resp.status_code == 200
     body = resp.json()
@@ -77,7 +77,7 @@ def test_suggest_interest_without_a_profile_uses_default_model(tmp_path, monkeyp
     monkeypatch.setattr(routes_interests, "suggest_interest", fake)
 
     with TestClient(app) as client:
-        resp = client.post("/interests/suggest", json={"topic": "calisthenics"})
+        resp = client.post("/api/interests/suggest", json={"topic": "calisthenics"})
 
     assert resp.status_code == 200
     body = resp.json()
@@ -100,8 +100,8 @@ def test_suggest_interest_uses_the_saved_profile_llm_model(tmp_path, monkeypatch
     monkeypatch.setattr(routes_interests, "suggest_interest", fake)
 
     with TestClient(app) as client:
-        client.put("/profile", json=_profile().model_dump(mode="json"))
-        resp = client.post("/interests/suggest", json={"topic": "music", "description": "rough draft"})
+        client.put("/api/profile", json=_profile().model_dump(mode="json"))
+        resp = client.post("/api/interests/suggest", json={"topic": "music", "description": "rough draft"})
 
     assert resp.status_code == 200
     assert captured["model"] == "gpt-4o-mini"  # matches this profile's llm.model default too, but via the row now

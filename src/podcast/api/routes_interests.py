@@ -1,4 +1,4 @@
-"""POST /interests/suggest — the settings UI's "suggest" button: one LLM
+"""POST /api/interests/suggest — the settings UI's "suggest" button: one LLM
 call drafting a one-line description plus event-shaped search queries for
 an interest topic."""
 

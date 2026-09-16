@@ -1,4 +1,4 @@
-"""GET /schedule/next — the scheduler's own next fire time for the
+"""GET /api/schedule/next — the scheduler's own next fire time for the
 configured cron expression."""
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""GET/PUT /profile. The DB row (id=1, single-user app) is the API's source
+"""GET/PUT /api/profile. The DB row (id=1, single-user app) is the API's source
 of truth — PUT never writes back to a YAML file. See docs/decisions.md."""
 
 from __future__ import annotations

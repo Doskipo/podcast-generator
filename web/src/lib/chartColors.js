@@ -1,28 +1,31 @@
-// Chart palette — the validated default categorical order from the dataviz
-// skill (references/palette.md), used verbatim (no brand substitution).
-// Slot order is the CVD-safety mechanism, not cosmetic: keep the fixed
-// order below rather than reassigning hues per chart. This app is
-// light-mode only (see App.jsx), so only the light steps are needed.
+// Charts use the exact same four-colour palette as the rest of the app
+// (see index.css's @theme block) — no separate chart palette. Recharts'
+// SVG fill/stroke attributes resolve CSS custom properties directly, so
+// these are plain var() references, not a second copy of the hex values.
+// Multiple series are told apart by opacity/dash, not by introducing new
+// hues. See docs/ui.md ("Palette").
 
 export const CHART = {
-  surface: '#fcfcfb',
-  ink: '#0b0b0b',
-  inkSecondary: '#52514e',
-  inkMuted: '#898781',
-  grid: '#e1e0d9',
-  axis: '#c3c2b7',
+  bg: 'var(--color-bg)',
+  surface: 'var(--color-surface)',
+  ink: 'var(--color-ink)',
+  accent: 'var(--color-accent)',
+  grid: 'color-mix(in srgb, var(--color-ink) 12%, transparent)',
+  axis: 'color-mix(in srgb, var(--color-ink) 35%, transparent)',
+  inkMuted: 'color-mix(in srgb, var(--color-ink) 55%, transparent)',
 }
 
-// Categorical slots 1-3, in fixed order — never reassigned per-series.
+// Categorical slots, in fixed order — same hue (accent) at decreasing
+// opacity, plus ink for the last slot, rather than unrelated hues.
 export const SERIES = {
-  blue: '#2a78d6',
-  orange: '#eb6834',
-  aqua: '#1baf7a',
+  strong: 'var(--color-accent)',
+  medium: 'color-mix(in srgb, var(--color-accent) 55%, transparent)',
+  soft: 'var(--color-ink)',
 }
 
-// Provider identity is consistent everywhere it appears (KPI copy, cost
-// chart legend): OpenAI is always blue, ElevenLabs is always orange.
+// Provider identity: OpenAI is the accent, ElevenLabs is ink — consistent
+// everywhere it appears (KPI copy, cost chart legend).
 export const PROVIDER_COLOR = {
-  openai: SERIES.blue,
-  elevenlabs: SERIES.orange,
+  openai: SERIES.strong,
+  elevenlabs: SERIES.soft,
 }

@@ -10,13 +10,29 @@ for the full decision log.
 
 ## Screenshots
 
-**Settings** — edit interests, hosts, style, and schedule.
+Desktop (1440×900) and mobile (390×844) — see [`docs/ui.md`](docs/ui.md#design) for the design
+pass these come from (palette, navigation, cards, the transcript view, etc).
 
-_docs/screenshots/settings.png — not yet captured._
+**Settings** — edit interests (Low/Medium/High weight), hosts, style, and schedule; one section
+icon per card.
 
-**Dashboard** — cost, completion rate, retention, and per-stage breakdown.
+| Desktop | Mobile |
+|---|---|
+| ![Settings, desktop](docs/screenshots/settings-desktop.png) | ![Settings, mobile](docs/screenshots/settings-mobile.png) |
 
-_docs/screenshots/dashboard.png — not yet captured._
+**Episodes** — episode cards with the script's own title, date, duration, status, and a labelled
+Details toggle; "Generate now" is always visible in the app shell.
+
+| Desktop | Mobile |
+|---|---|
+| ![Episodes, desktop](docs/screenshots/episodes-desktop.png) | ![Episodes, mobile](docs/screenshots/episodes-mobile.png) |
+
+**Dashboard** — cost, completion rate, retention, and per-stage breakdown, with a toggle for
+whether mocked demo data is included.
+
+| Desktop | Mobile |
+|---|---|
+| ![Dashboard, desktop](docs/screenshots/dashboard-desktop.png) | ![Dashboard, mobile](docs/screenshots/dashboard-mobile.png) |
 
 ## Quickstart (Docker)
 

@@ -1,17 +1,19 @@
+import { ChevronDown, ChevronUp } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
-import Button from '../components/Button.jsx'
-import Card from '../components/Card.jsx'
-import EpisodeRow from '../components/EpisodeRow.jsx'
+import EpisodeCard from '../components/EpisodeCard.jsx'
+import { EPISODE_CREATED_EVENT } from '../hooks/useGenerateEpisode.js'
 
 const POLL_INTERVAL_MS = 3000
 const IN_FLIGHT_STATUSES = new Set(['pending', 'running'])
+const OLDER_THAN_DAYS = 14
+const OLDER_THAN_MS = OLDER_THAN_DAYS * 24 * 60 * 60 * 1000
 
 export default function Episodes() {
   const [episodes, setEpisodes] = useState([])
   const [listError, setListError] = useState(null)
-  const [generating, setGenerating] = useState(false)
-  const [generateError, setGenerateError] = useState(null)
+  const [hosts, setHosts] = useState([])
+  const [showOlder, setShowOlder] = useState(false)
   const timeoutRef = useRef(null)
 
   // Re-fetches the list, then — only while at least one episode is still
@@ -35,42 +37,62 @@ export default function Episodes() {
 
   useEffect(() => {
     refresh()
-    return () => clearTimeout(timeoutRef.current)
+    window.addEventListener(EPISODE_CREATED_EVENT, refresh)
+    return () => {
+      clearTimeout(timeoutRef.current)
+      window.removeEventListener(EPISODE_CREATED_EVENT, refresh)
+    }
   }, [refresh])
 
-  async function handleGenerate() {
-    setGenerating(true)
-    setGenerateError(null)
-    try {
-      await api.createEpisode()
-      await refresh() // picks up the new pending row and (re)starts the poll loop
-    } catch (err) {
-      setGenerateError(err.message)
-    } finally {
-      setGenerating(false)
-    }
-  }
+  useEffect(() => {
+    // Hosts (for the transcript's speaker colours/avatars/bios) come from
+    // the single profile, not per-episode — best-effort: no profile yet
+    // just means ScriptView falls back to uncoloured speaker names.
+    api
+      .getProfile()
+      .then((p) => setHosts(p.podcast.hosts))
+      .catch(() => setHosts([]))
+  }, [])
+
+  const cutoff = Date.now() - OLDER_THAN_MS
+  const recent = episodes.filter((e) => new Date(e.created_at).getTime() >= cutoff)
+  const older = episodes.filter((e) => new Date(e.created_at).getTime() < cutoff)
 
   return (
-    <Card
-      title="Episodes"
-      actions={
-        <Button onClick={handleGenerate} disabled={generating}>
-          {generating ? 'Starting…' : 'Generate now'}
-        </Button>
-      }
-    >
-      {generateError && <p className="mb-2 text-sm text-red-600">{generateError}</p>}
-      {listError && <p className="mb-2 text-sm text-red-600">{listError}</p>}
-      {episodes.length === 0 ? (
-        <p className="text-sm text-slate-500">No episodes yet — click "Generate now" to create one.</p>
+    <div className="space-y-4">
+      <h1 className="text-lg font-semibold text-surface">Episodes</h1>
+
+      {listError && <p className="text-sm text-accent">{listError}</p>}
+
+      {episodes.length === 0 && !listError ? (
+        <p className="text-sm text-surface/70">No episodes yet — use the Generate now button to create your first one.</p>
       ) : (
-        <div>
-          {episodes.map((episode) => (
-            <EpisodeRow key={episode.episode_id} episode={episode} />
+        <div className="space-y-3">
+          {recent.map((episode) => (
+            <EpisodeCard key={episode.episode_id} episode={episode} hosts={hosts} />
           ))}
+
+          {older.length > 0 && (
+            <div>
+              <button
+                type="button"
+                onClick={() => setShowOlder((v) => !v)}
+                className="flex items-center gap-1.5 py-2 text-sm font-medium text-surface/70 hover:text-surface"
+              >
+                {showOlder ? <ChevronUp className="h-4 w-4" aria-hidden="true" /> : <ChevronDown className="h-4 w-4" aria-hidden="true" />}
+                Older ({older.length})
+              </button>
+              {showOlder && (
+                <div className="space-y-3">
+                  {older.map((episode) => (
+                    <EpisodeCard key={episode.episode_id} episode={episode} hosts={hosts} />
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
-    </Card>
+    </div>
   )
 }

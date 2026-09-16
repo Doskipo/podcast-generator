@@ -1,8 +1,9 @@
+import { Calendar, Mic2, Sparkles, Tags, Tv } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api } from '../api.js'
 import Button from '../components/Button.jsx'
 import Card from '../components/Card.jsx'
-import Field, { TextArea, TextInput } from '../components/Field.jsx'
+import Field, { TextInput } from '../components/Field.jsx'
 import HostEditor from '../components/HostEditor.jsx'
 import InterestEditor from '../components/InterestEditor.jsx'
 import SchedulePicker from '../components/SchedulePicker.jsx'
@@ -80,15 +81,25 @@ export default function Settings() {
   }
 
   if (loadError) {
-    return <Card title="Settings">Failed to load profile: {loadError}</Card>
+    return (
+      <Card title="Settings">
+        <p className="text-sm text-accent">Failed to load profile: {loadError}</p>
+      </Card>
+    )
   }
   if (!profile) {
-    return <Card title="Settings">Loading…</Card>
+    return (
+      <Card title="Settings">
+        <p className="text-sm text-ink/55">Loading…</p>
+      </Card>
+    )
   }
 
   return (
     <form onSubmit={handleSave} className="space-y-4">
-      <Card title="Show">
+      <h1 className="text-lg font-semibold text-surface">Settings</h1>
+
+      <Card title="Show" icon={Tv}>
         <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Podcast name">
             <TextInput
@@ -122,14 +133,14 @@ export default function Settings() {
         </div>
       </Card>
 
-      <Card title="Interests">
+      <Card title="Interests" icon={Tags}>
         <InterestEditor
           interests={profile.interests}
           onChange={(interests) => setProfile((p) => ({ ...p, interests }))}
         />
       </Card>
 
-      <Card title="Hosts">
+      <Card title="Hosts" icon={Mic2}>
         <HostEditor
           hosts={profile.podcast.hosts}
           voices={voices}
@@ -137,7 +148,7 @@ export default function Settings() {
         />
       </Card>
 
-      <Card title="Style">
+      <Card title="Style" icon={Sparkles}>
         <div className="grid gap-4 sm:grid-cols-2">
           <Slider label="Humour" value={profile.podcast.style.humour} min={0} max={3} onChange={(humour) => updateStyle({ humour })} />
           <Slider label="Depth" value={profile.podcast.style.depth} min={1} max={3} onChange={(depth) => updateStyle({ depth })} />
@@ -146,7 +157,7 @@ export default function Settings() {
         </div>
       </Card>
 
-      <Card title="Schedule">
+      <Card title="Schedule" icon={Calendar}>
         <SchedulePicker value={profile.schedule} onChange={(schedule) => setProfile((p) => ({ ...p, schedule }))} />
       </Card>
 
@@ -154,8 +165,8 @@ export default function Settings() {
         <Button type="submit" disabled={saving}>
           {saving ? 'Saving…' : 'Save'}
         </Button>
-        {saved && <span className="text-sm text-green-700">Saved.</span>}
-        {saveError && <span className="text-sm text-red-600">{saveError}</span>}
+        {saved && <span className="text-sm text-accent">Saved.</span>}
+        {saveError && <span className="text-sm text-accent">{saveError}</span>}
       </div>
     </form>
   )
