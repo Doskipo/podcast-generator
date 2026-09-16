@@ -1,7 +1,7 @@
 # Solution
 
 A condensed write-up of what was built and why. The full, dated reasoning behind every decision
-below — including the ones that turned out wrong on the first try — lives in
+below, including the ones that turned out wrong on the first try, lives in
 [`docs/decisions.md`](docs/decisions.md); this file is the summary a reviewer would want before
 diving into that log or the code.
 
@@ -62,15 +62,20 @@ The system also uses different timeframes to decide how old an article can be. F
   current run's line at the same position (a real bug caught mid-project).
 
 These two points need rewrite.
-- **Backend: SQLite + a background task, not Postgres + a queue.** Single-user take-home scope —
-  no ops for a file DB, no worker infra for `BackgroundTasks`. Named, deliberate limitations: no
-  crash recovery for a `status="running"` row, no concurrency control across simultaneous
-  `POST /episodes` calls. What changes at real multi-user scale is called out explicitly in the
-  decision log rather than left implicit.
-- **Dashboard cost is computed from persisted manifests at request time**, not cached — matches
-  "every stage's output is the source of truth on disk" and the task's own framing. Mocked demo
-  data (`podcast seed-metrics`) is DB-only (no fake manifest files) and structurally distinct from
-  real data (`mocked=True`, never lands on today's date), so the two can never be confused.
+- **Backend: SQLite and a background task, not Postgres and a queue.** Something has to store
+  the profile, run generation on a timer, serve the mp3 and record what happened, so there is a
+  backend. But this is a single-listener product: a file database needs no server to operate,
+  and a background task inside the API process needs no worker infrastructure. The cost is
+  named rather than hidden: if the process dies mid-episode the row stays `running` (now
+  reconciled to `failed` on startup), and two simultaneous requests are not serialised. At
+  multi-user scale the pipeline itself would not change, only what runs it: Postgres for the
+  tables, a job queue with workers for generation, object storage for the artefacts.
+- **Dashboard costs are computed from the artefacts on request, not cached.** Every stage
+  already records its token and character usage in its own manifest, so the manifests are the
+  source of truth and the dashboard reads them rather than maintaining a second copy that could
+  drift. Mocked demo data lives only in the database, is flagged `mocked=True`, never lands on
+  today's date, and is excluded from the Episodes page and from the KPIs unless explicitly
+  toggled on — so a reviewer can never mistake seeded usage for real spend.
 
 
 ## Costs and numbers
@@ -89,11 +94,12 @@ order-of-magnitude, not an invoice).
   since synthesis scales with characters). TTS is 68% of the time; the four LLM stages take
   roughly 25–55 seconds each; fetch and stitch are seconds. Generation runs as a background
   task, so the user never waits on it.
-- Words per minute: 140, measured over the two episodes that went through the perform stage
-  (2,900 words in 20.7 minutes). The original assumption of 150 produced an 11'49" episode
-  for an 8-minute target; the word budget now uses the measured rate, the perform stage is
-  capped at +10% words over the critique script, and the calibration reruns over every
-  completed episode.
+- Words per minute: calibrated at 139.6 from completed episodes, but that measurement was
+  taken over runs that included faster, flatter synthesis. With v3 dialogue, audio tags,
+  varied pauses, interruptions, the real rate is closer to 100, so a 7-minute target came
+  out at 9'45". The budget mechanism works (the script lands within a few words of its
+  budget); the constant is wrong for the current voice model. Recalibrating it per TTS model
+  is the first thing I would fix.
 - Dashboard metrics are chosen to answer four questions: does anyone listen to the end
   (completion rate), do they come back (D7 retention), what does each episode cost (cost by
   stage and provider), and what breaks (failures and no-content episodes). Real and mocked
@@ -112,6 +118,16 @@ order-of-magnitude, not an invoice).
 - Pricing constants are illustrative, not measured against a real invoice.
 - Some interests are not news-shaped (calisthenics lives on YouTube and Reddit, not in news
   outlets); the evergreen primer covers the gap rather than solving it.
+- Generated search queries are visible only when the Suggest button returns them; they are
+  cached on the profile but not editable in the UI afterwards.
+- The voice catalogue assumes a paid ElevenLabs plan (library voices and the v3 dialogue
+  endpoint are not available on the free tier); the app should check the account's tier and
+  only offer voices the key can actually use.
+- No quota check before synthesis: the provided ElevenLabs key ran out mid-run on the final
+  day, which the pipeline handled correctly (the script and performance artefacts survived,
+  so the episode was resumable with `--from-performance`), but the app should surface
+  remaining provider quota before starting an expensive stage.
+
 
 ## Future work
 
