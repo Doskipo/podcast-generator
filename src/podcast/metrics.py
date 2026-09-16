@@ -341,15 +341,26 @@ def _recent_failures(episodes: list[db.EpisodeRecord], events_by_ts: list[db.Eve
     return results
 
 
-def aggregate_summary(session: Session) -> MetricsSummaryData:
-    episodes = list(session.exec(select(db.EpisodeRecord)).all())
-    events = sorted(session.exec(select(db.EventRecord)).all(), key=lambda e: e.ts)
+def aggregate_summary(session: Session, include_mocked: bool = False) -> MetricsSummaryData:
+    """`include_mocked=False` (the dashboard default) computes every KPI
+    below from real, non-mocked rows only — `podcast seed-metrics`' rows
+    exist to give a fresh install something to render, not to be quietly
+    blended into the numbers that judge the pipeline's actual behavior. See
+    docs/decisions.md ("Re-measured words-per-minute, dashboard
+    mocked-data toggle"). `has_mocked_data` is always computed over every
+    row regardless of `include_mocked`, so the caller can tell whether
+    opting in would change anything."""
+    all_episodes = list(session.exec(select(db.EpisodeRecord)).all())
+    all_events = sorted(session.exec(select(db.EventRecord)).all(), key=lambda e: e.ts)
+
+    has_mocked_data = any(r.mocked for r in all_episodes) or any(e.mocked for e in all_events)
+
+    episodes = all_episodes if include_mocked else [r for r in all_episodes if not r.mocked]
+    events = all_events if include_mocked else [e for e in all_events if not e.mocked]
 
     status_counts = Counter(r.status for r in episodes)
     episodes_by_status = [EpisodesByStatus(status=status, count=count) for status, count in sorted(status_counts.items())]
     no_content = status_counts.get("no_content", 0)
-
-    has_mocked_data = any(r.mocked for r in episodes) or any(e.mocked for e in events)
 
     cost_totals: dict[tuple[str, str], float] = defaultdict(float)
     episode_total_cost: dict[str, float] = {}

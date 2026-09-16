@@ -87,10 +87,52 @@ def test_metrics_summary_aggregates_done_and_failed_episodes(tmp_path, monkeypat
     assert body["no_content"] == 0
     assert {s["status"]: s["count"] for s in body["episodes_by_status"]} == {"done": 1, "failed": 1}
     assert body["has_mocked_data"] is False
+    assert body["include_mocked"] is False
     assert len(body["daily_series"]) == 30
     failed_row = next(f for f in body["recent_failures"] if f["episode_id"] == "ep-failed")
     assert failed_row["status"] == "failed"
     assert failed_row["mocked"] is False
+
+
+def test_metrics_summary_defaults_to_real_episodes_and_toggle_switches_the_whole_response(tmp_path, monkeypatch):
+    _configure_test_db(monkeypatch, tmp_path)
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    with TestClient(app) as client:
+        put_resp = client.put("/profile", json=_profile().model_dump(mode="json"))
+        profile_id = 1
+        assert put_resp.status_code == 200
+
+        with db.session_scope() as session:
+            real = service.get_or_create_episode_record(session, "ep-real", profile_id)
+            real.status = "done"
+            real.total_characters = 500
+            session.add(real)
+
+            mocked = service.get_or_create_episode_record(session, "ep-mocked", profile_id)
+            mocked.status = "done"
+            mocked.total_characters = 500
+            mocked.mocked = True
+            session.add(mocked)
+
+            session.commit()
+
+        default_resp = client.get("/metrics/summary")
+        opted_in_resp = client.get("/metrics/summary?include_mocked=true")
+
+    assert default_resp.status_code == 200
+    default_body = default_resp.json()
+    assert default_body["total_episodes"] == 1  # ep-mocked excluded
+    assert default_body["total_characters"] == 500
+    assert default_body["include_mocked"] is False
+    assert default_body["has_mocked_data"] is True  # still signals a toggle is worth showing
+
+    assert opted_in_resp.status_code == 200
+    opted_in_body = opted_in_resp.json()
+    assert opted_in_body["total_episodes"] == 2  # both included
+    assert opted_in_body["total_characters"] == 1000
+    assert opted_in_body["include_mocked"] is True
+    assert opted_in_body["has_mocked_data"] is True
 
 
 def test_metrics_summary_with_no_episodes(tmp_path, monkeypatch):

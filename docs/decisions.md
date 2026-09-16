@@ -1460,6 +1460,62 @@ and `solution.md`.
   default happens to be — decouples that test's round-number arithmetic from a value this entry
   says outright isn't settled yet.
 
+## Outline transitions — 2026-09-16
+The outline used to hand the script step a bare story order with no guidance on how to bridge
+between stories — script.py improvised the segue every time, with nothing stopping it from
+implying a connection between two unrelated stories just because they happened to be adjacent.
+
+- **`Transition{kind, text_hint}` on `OutlineStory`.** `kind` is `"link"` (a genuine connection —
+  shared mechanism, same person/organization, same underlying tension) or `"clean_transition"` (a
+  short, neutral handoff, no claimed connection). `text_hint` is a short phrase, not dialogue, for
+  script.py to build the actual connecting/handoff lines from. `None` only for the first story —
+  nothing precedes it; every later story requires one, enforced in `outline._validate_outline`
+  (same one-retry-with-feedback path as every other structural check in that stage).
+- **Default to `clean_transition`, never invent a link.** Stated directly in the outline prompt:
+  pick `link` only when the connection is real, default to `clean_transition` when unsure. This is
+  a prompt-level instruction, not something code can verify (whether a connection is "genuine" is
+  a judgment call) — the structural guarantee is only that every non-first story picks *one* of
+  the two kinds, not which one is correct.
+- **script.py renders and acts on it**, not just outline.py producing it: `_render_outline_story`
+  adds a `Transition in from the previous story: ...` line, and the system prompt tells the
+  writing model to actually build the opening lines from a `link`'s hint (not just assert
+  relatedness) or use a short neutral pivot for `clean_transition` — the same "never manufacture a
+  link that isn't in the hint" rule restated at the writing step, since that's a separate LLM call
+  with no memory of the outline prompt.
+- **Logged, not just persisted.** `outline_stage` logs each story's chosen transition (kind +
+  hint) at INFO after a valid outline is produced — visible in a normal run without opening
+  `outline.json`.
+
+## Re-measured words-per-minute, dashboard mocked-data toggle — 2026-09-16
+`LLMSettings.words_per_minute`'s default was pinned from a single real episode (see "Measured
+words-per-minute" above, 135.8 wpm, `episode_count=1`) with an explicit note to re-run
+`measured_words_per_minute()` once more real episodes existed. Two more have completed since
+(both through the `perform` stage) — re-running it now gives **140.0 wpm** (2,900 words / 20.715
+minutes, `episode_count=2`), the new default. Still not a large sample; the same re-run-later note
+stays on the field's docstring.
+
+- **Dashboard KPIs now default to real episodes only.** `metrics.aggregate_summary` gained an
+  `include_mocked: bool = False` parameter — `has_mocked_data` is still computed over *every*
+  episode/event row (so the frontend knows whether a toggle is worth showing at all), but the
+  actual KPI numbers, cost/stage breakdowns, topic distribution, stage durations, and daily series
+  are computed only from real (non-mocked) rows unless the caller opts in. `GET /metrics/summary`
+  takes the same `include_mocked` as a query param (default `false`) and echoes it back on the
+  response, so the frontend has one source of truth for which mode produced the numbers it's
+  showing rather than tracking it only in local component state.
+- **Why default real-only, not combined.** The dashboard's whole point is judging the pipeline's
+  actual production behavior (see each KPI's `why` copy in `Dashboard.jsx`) — `podcast
+  seed-metrics`' plausible-but-fake rows exist only so the dashboard has something to render on a
+  fresh install, and silently blending them into the default view understates how thin the real
+  data still is. Kept as an opt-in toggle, not removed outright, since demoing the dashboard's
+  full shape (retention curves, daily series with real volume) still needs the seeded rows when
+  there's only a handful of real episodes.
+- **Frontend**: `Dashboard.jsx` holds `includeMocked` state (default `false`), refetches on
+  toggle, and always labels the active mode ("Real episodes only" / "Real + mocked demo data")
+  next to the toggle — never lets the numbers change without the label changing too. The toggle
+  itself is only rendered when `has_mocked_data` is true (nothing to switch to otherwise); the
+  existing violet "some numbers include seeded demo data" banner now only shows in the
+  `includeMocked` mode, since in real-only mode that's no longer true.
+
 ## Future work.
 - Add **suggest topics from previous episodes** from the previous podcasts. So it generatos a topic 
 (or a bunch of topics) for a podcast for you.

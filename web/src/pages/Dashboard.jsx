@@ -32,11 +32,14 @@ function formatUsd(amount) {
 export default function Dashboard() {
   const [summary, setSummary] = useState(null)
   const [error, setError] = useState(null)
+  // Dashboard KPIs default to real episodes only — see docs/decisions.md
+  // ("Re-measured words-per-minute, dashboard mocked-data toggle").
+  const [includeMocked, setIncludeMocked] = useState(false)
 
   useEffect(() => {
     let cancelled = false
     api
-      .getMetricsSummary()
+      .getMetricsSummary(includeMocked)
       .then((data) => {
         if (!cancelled) setSummary(data)
       })
@@ -46,7 +49,7 @@ export default function Dashboard() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [includeMocked])
 
   if (error) {
     return (
@@ -66,7 +69,24 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6">
-      {summary.has_mocked_data && (
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm">
+        <span className="font-medium text-slate-700">
+          Showing: {summary.include_mocked ? 'real episodes + mocked demo data' : 'real episodes only'}
+        </span>
+        {summary.has_mocked_data && (
+          <label className="flex items-center gap-2 text-slate-600">
+            <input
+              type="checkbox"
+              checked={includeMocked}
+              onChange={(e) => setIncludeMocked(e.target.checked)}
+              className="h-4 w-4 rounded border-slate-300"
+            />
+            Include mocked usage
+          </label>
+        )}
+      </div>
+
+      {summary.include_mocked && (
         <div className="flex items-center gap-2 rounded-lg border border-violet-200 bg-violet-50 px-4 py-2.5 text-sm text-violet-800">
           <MockedBadge />
           Some of the numbers below include seeded demo data (

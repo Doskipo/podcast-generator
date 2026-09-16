@@ -52,6 +52,6 @@ export const api = {
   postEpisodeEvent: (id, type, metadata) => postJson(`/episodes/${id}/events`, { type, metadata }),
   episodeAudioUrl: (id) => `/episodes/${id}/audio`,
 
-  getMetricsSummary: () => getJson('/metrics/summary'),
+  getMetricsSummary: (includeMocked = false) => getJson(`/metrics/summary?include_mocked=${includeMocked}`),
   getScheduleNext: () => getJson('/schedule/next'),
 }

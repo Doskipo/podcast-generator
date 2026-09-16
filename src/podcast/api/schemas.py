@@ -125,6 +125,12 @@ class MetricsSummary(BaseModel):
     daily_series: list[DailyPointOut]
     recent_failures: list[RecentFailureOut]
     has_mocked_data: bool
+    # Echoes the request's `include_mocked` query param — the single source
+    # of truth for which mode produced these numbers, so the frontend never
+    # has to track it separately from what it asked for. See
+    # docs/decisions.md ("Re-measured words-per-minute, dashboard
+    # mocked-data toggle").
+    include_mocked: bool
 
 
 class NextRunOut(BaseModel):

@@ -28,6 +28,7 @@ from podcast.models import (
     Segment,
     Style,
     TokenUsage,
+    Transition,
 )
 from podcast.stages import script as script_module
 
@@ -263,6 +264,45 @@ def test_render_outline_story_includes_primer_instruction_only_when_is_primer():
     news_story = story.model_copy(update={"is_primer": False})
     rendered_news = script_module._render_outline_story(news_story, recurring_bits_by_id={})
     assert "not news" not in rendered_news
+
+
+def test_render_outline_story_includes_transition_hint_only_when_present():
+    base_story = OutlineStory(
+        headline="Story 2",
+        source_ids=["abcd1234"],
+        angle=Angle(why_it_matters="w", tension_or_surprise="t", host_take="h", tangent=None),
+        stances=[
+            HostStance(host="Nova", attitude="curious", why="w"),
+            HostStance(host="Max", attitude="curious", why="w"),
+        ],
+    )
+
+    linked = base_story.model_copy(update={"transition": Transition(kind="link", text_hint="same company")})
+    rendered_linked = script_module._render_outline_story(linked, recurring_bits_by_id={})
+    assert "LINK" in rendered_linked
+    assert "same company" in rendered_linked
+
+    clean = base_story.model_copy(
+        update={"transition": Transition(kind="clean_transition", text_hint="pivot, nothing connects them")}
+    )
+    rendered_clean = script_module._render_outline_story(clean, recurring_bits_by_id={})
+    assert "clean handoff" in rendered_clean
+    assert "pivot, nothing connects them" in rendered_clean
+
+    no_transition = base_story  # first story, no transition
+    rendered_none = script_module._render_outline_story(no_transition, recurring_bits_by_id={})
+    assert "Transition in from the previous story" not in rendered_none
+
+
+def test_build_prompts_states_transition_rule():
+    profile = _profile()
+    outline_output = _outline_output("ep1", "abcd1234")
+    articles = [_article("abcd1234")]
+
+    system_prompt, _user_prompt = script_module._build_prompts(profile, outline_output.outline, articles)
+
+    assert "LINK" in system_prompt
+    assert "never manufacture a link" in system_prompt
 
 
 def test_render_listener_includes_facts_when_present():

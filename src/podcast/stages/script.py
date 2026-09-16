@@ -138,6 +138,15 @@ def _render_outline_story(story: OutlineStory, recurring_bits_by_id: dict[str, R
         # id if it's somehow missing rather than crashing script generation.
         bit_line = f"\n  Recurring bit here: {bit.name} — {bit.description}" if bit else f"\n  Recurring bit here: {story.recurring_bit}"
     tangent_line = f"\n  Possible tangent: {angle.tangent}" if angle.tangent else ""
+    transition_line = ""
+    if story.transition:
+        if story.transition.kind == "link":
+            transition_line = f"\n  Transition in from the previous story: LINK — {story.transition.text_hint}"
+        else:
+            transition_line = (
+                f"\n  Transition in from the previous story: clean handoff, no claimed connection — "
+                f"{story.transition.text_hint}"
+            )
     # outline_stage sets this from whether the story's sources are a
     # Wikipedia primer (podcast.evergreen), not asked of this stage's own
     # model — same "no news framing" instruction outline.py already gave
@@ -159,6 +168,7 @@ def _render_outline_story(story: OutlineStory, recurring_bits_by_id: dict[str, R
         f"  Host take: {angle.host_take}\n"
         f"  Stances:\n{stances_block}"
         f"{tangent_line}"
+        f"{transition_line}"
         f"{bit_line}"
         f"{primer_line}"
     )
@@ -249,6 +259,12 @@ def _build_prompts(profile: Profile, outline: Outline, articles: list[Article]) 
         "- Each segment must follow its outline entry's angle below: bring out why it "
         "matters and the tension or surprise, let the host it names take the lead, and "
         "use the tangent naturally if it fits the moment.\n"
+        "- Each segment (other than the first) opens using its outline entry's transition. "
+        "For a LINK transition, actually make the connection explicit in the opening lines, "
+        "built from the given hint — don't just assert it's related. For a clean handoff "
+        "transition, use a short, natural pivot (a line or two moving off the previous "
+        "story) with no claimed connection — never manufacture a link that isn't in the "
+        "hint.\n"
         "- Each segment should land close to its stated word budget (within about 20% "
         "either way) — a segment given 80 words is a quick hit, not a deep dive.\n"
         "- Give each host a real mix of line lengths within a segment: short reactions, "

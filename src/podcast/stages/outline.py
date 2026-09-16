@@ -34,6 +34,7 @@ from podcast.models import (
     RankOutput,
     RecurringBit,
     TokenUsage,
+    Transition,
 )
 from podcast.paths import episode_dir
 
@@ -111,6 +112,16 @@ def _build_prompts(profile: Profile, articles: list[Article]) -> tuple[str, str]
         "host's persona and home turf above, and an arc — how the stance shifts by the "
         "end of the segment, if it does at all (null if it stays constant throughout). "
         f"Every story needs exactly one stance per host: {host_names}.\n"
+        "For every story after the first, decide how it bridges from the story immediately "
+        "before it: transition.kind is either \"link\" — only when there's a genuine "
+        "connection to the previous story (a shared mechanism, the same person or "
+        "organization, the same underlying tension) — or \"clean_transition\" — a short "
+        "handoff with no claimed connection. Default to clean_transition when you're not "
+        "sure a link is real; never invent a connection just to justify one. "
+        "transition.text_hint is a short phrase (not full dialogue) describing the "
+        "connection (for link) or the handoff framing (for clean_transition) for the "
+        "script step to build from. The first story has no story before it — leave its "
+        "transition null.\n"
         "If a recurring bit genuinely fits a story, set recurring_bit to its id exactly "
         "as listed above (the response schema only accepts those ids, or null) — never "
         "exceed a bit's stated max uses per episode, and leave it null if nothing fits. "
@@ -160,6 +171,7 @@ def _response_model(bit_ids: list[str], host_names: list[str]) -> type[BaseModel
         angle=(Angle, ...),
         recurring_bit=(recurring_bit_type, None),
         stances=(stances_model, ...),
+        transition=(Transition | None, None),
     )
     return create_model(
         "OutlineResponse",
@@ -217,7 +229,15 @@ def _validate_outline(
 
     used_ids: set[str] = set()
     bit_counts: dict[str, int] = {}
-    for story in outline.stories:
+    for i, story in enumerate(outline.stories):
+        if i == 0:
+            if story.transition is not None:
+                raise ValueError(f"story {story.headline!r} is the first story and must not have a transition")
+        elif story.transition is None:
+            raise ValueError(
+                f"story {story.headline!r} at position {i} must have a transition (link or clean_transition)"
+            )
+
         used_ids.update(story.source_ids)
         story_ids = set(story.source_ids)
         if story_ids & evergreen_ids and story_ids - evergreen_ids:
@@ -320,6 +340,13 @@ def outline_stage(episode: Episode, rank_output: RankOutput, client: OpenAI | No
         _validate_outline(outline, known_ids, profile.podcast.recurring_bits, host_names, evergreen_ids)
 
     outline = generate_with_retry(generate, validate, user_prompt, stage_name="outline")
+
+    for i, story in enumerate(outline.stories):
+        if story.transition is not None:
+            logger.info(
+                "outline: story %d %r transition=%s hint=%r",
+                i, story.headline, story.transition.kind, story.transition.text_hint,
+            )
 
     # word_budget is code-computed, not asked of the model — proportional to
     # each story's rank score, summing to duration_minutes*words_per_minute

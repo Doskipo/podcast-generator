@@ -4,6 +4,7 @@ monkeypatched at the outline module's _generate_outline seam.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -26,6 +27,7 @@ from podcast.models import (
     RecurringBit,
     Style,
     TokenUsage,
+    Transition,
 )
 from podcast.stages import outline as outline_module
 
@@ -85,6 +87,10 @@ def _rank_output(episode_id: str, articles: list[Article]) -> RankOutput:
 
 def _angle(tangent: str | None = "a tangent") -> Angle:
     return Angle(why_it_matters="it matters", tension_or_surprise="a twist", host_take="Nova cares", tangent=tangent)
+
+
+def _transition(kind: str = "clean_transition", text_hint: str = "pivot to the next story") -> Transition:
+    return Transition(kind=kind, text_hint=text_hint)
 
 
 def _stances() -> list[HostStance]:
@@ -194,7 +200,14 @@ def test_outline_stage_rejects_recurring_bit_over_its_max(tmp_path, monkeypatch)
         title="Test Episode",
         stories=[
             OutlineStory(headline="Story 1", source_ids=["a1"], angle=_angle(tangent=None), recurring_bit="pin-drop", stances=_stances()),
-            OutlineStory(headline="Story 2", source_ids=["a2"], angle=_angle(tangent=None), recurring_bit="pin-drop", stances=_stances()),
+            OutlineStory(
+                headline="Story 2",
+                source_ids=["a2"],
+                angle=_angle(tangent=None),
+                recurring_bit="pin-drop",
+                stances=_stances(),
+                transition=_transition(),
+            ),
         ],
     )
     monkeypatch.setattr(
@@ -387,7 +400,13 @@ def test_outline_stage_allocates_word_budget_proportional_to_score(tmp_path, mon
         title="Test Episode",
         stories=[
             OutlineStory(headline="High story", source_ids=["high"], angle=_angle(tangent=None), stances=_stances()),
-            OutlineStory(headline="Low story", source_ids=["low"], angle=_angle(tangent=None), stances=_stances()),
+            OutlineStory(
+                headline="Low story",
+                source_ids=["low"],
+                angle=_angle(tangent=None),
+                stances=_stances(),
+                transition=_transition(),
+            ),
         ],
     )
     monkeypatch.setattr(
@@ -637,3 +656,129 @@ def test_outline_stage_refuses_zero_selected_articles(monkeypatch):
     # calling the model.
     with pytest.raises(ValueError, match="zero sources"):
         outline_module.outline_stage(episode, rank_output, client=object())
+
+
+def test_outline_stage_rejects_a_transition_on_the_first_story(tmp_path, monkeypatch):
+    profile = _profile()
+    episode = _episode(profile)
+    articles = [_article("abcd1234")]
+    rank_output = _rank_output(episode.episode_id, articles)
+
+    fixture_outline = Outline(
+        title="Test Episode",
+        stories=[
+            OutlineStory(
+                headline="Something happened",
+                source_ids=["abcd1234"],
+                angle=_angle(tangent=None),
+                stances=_stances(),
+                transition=_transition(),  # nothing precedes the first story — this must be null
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        outline_module,
+        "_generate_outline",
+        lambda client, model, system_prompt, user_prompt, bit_ids, host_names: (fixture_outline, _FIXTURE_USAGE),
+    )
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    with pytest.raises(ValueError, match="first story and must not have a transition"):
+        outline_module.outline_stage(episode, rank_output, client=object())
+
+
+def test_outline_stage_rejects_a_missing_transition_on_a_later_story(tmp_path, monkeypatch):
+    profile = _profile()
+    episode = _episode(profile)
+    articles = [_article("a1"), _article("a2")]
+    rank_output = _rank_output(episode.episode_id, articles)
+
+    fixture_outline = Outline(
+        title="Test Episode",
+        stories=[
+            OutlineStory(headline="Story 1", source_ids=["a1"], angle=_angle(tangent=None), stances=_stances()),
+            # Story 2 is missing a transition
+            OutlineStory(headline="Story 2", source_ids=["a2"], angle=_angle(tangent=None), stances=_stances()),
+        ],
+    )
+    monkeypatch.setattr(
+        outline_module,
+        "_generate_outline",
+        lambda client, model, system_prompt, user_prompt, bit_ids, host_names: (fixture_outline, _FIXTURE_USAGE),
+    )
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    with pytest.raises(ValueError, match="must have a transition"):
+        outline_module.outline_stage(episode, rank_output, client=object())
+
+
+def test_outline_stage_accepts_link_and_clean_transition_and_logs_them(tmp_path, monkeypatch, caplog):
+    profile = _profile()
+    episode = _episode(profile)
+    articles = [_article("a1"), _article("a2"), _article("a3")]
+    rank_output = _rank_output(episode.episode_id, articles)
+
+    fixture_outline = Outline(
+        title="Test Episode",
+        stories=[
+            OutlineStory(headline="Story 1", source_ids=["a1"], angle=_angle(tangent=None), stances=_stances()),
+            OutlineStory(
+                headline="Story 2",
+                source_ids=["a2"],
+                angle=_angle(tangent=None),
+                stances=_stances(),
+                transition=_transition(kind="link", text_hint="same company as Story 1"),
+            ),
+            OutlineStory(
+                headline="Story 3",
+                source_ids=["a3"],
+                angle=_angle(tangent=None),
+                stances=_stances(),
+                transition=_transition(kind="clean_transition", text_hint="pivot, nothing connects them"),
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        outline_module,
+        "_generate_outline",
+        lambda client, model, system_prompt, user_prompt, bit_ids, host_names: (fixture_outline, _FIXTURE_USAGE),
+    )
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    with caplog.at_level(logging.INFO, logger="podcast.stages.outline"):
+        output = outline_module.outline_stage(episode, rank_output, client=object())
+
+    assert output.outline.stories[0].transition is None
+    assert output.outline.stories[1].transition.kind == "link"
+    assert output.outline.stories[2].transition.kind == "clean_transition"
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("link" in m and "same company as Story 1" in m for m in messages)
+    assert any("clean_transition" in m and "pivot, nothing connects them" in m for m in messages)
+
+
+def test_response_model_transition_is_nullable_and_constrains_kind():
+    model = outline_module._response_model([], ["Nova", "Max"])
+
+    story = {
+        "headline": "h",
+        "source_ids": ["a"],
+        "angle": {"why_it_matters": "w", "tension_or_surprise": "t", "host_take": "h", "tangent": None},
+        "stances": _STANCE_OBJECT,
+    }
+
+    # null transition validates (e.g. the first story)
+    none_ok = model.model_validate({"title": "t", "stories": [story]})
+    assert none_ok.stories[0].transition is None
+
+    # a valid transition validates
+    ok = model.model_validate(
+        {"title": "t", "stories": [{**story, "transition": {"kind": "link", "text_hint": "same person"}}]}
+    )
+    assert ok.stories[0].transition.kind == "link"
+
+    # an invalid kind is rejected at the schema level
+    with pytest.raises(ValueError):
+        model.model_validate(
+            {"title": "t", "stories": [{**story, "transition": {"kind": "related", "text_hint": "x"}}]}
+        )

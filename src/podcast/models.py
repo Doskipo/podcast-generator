@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import BaseModel, Field, HttpUrl, model_validator
@@ -163,10 +164,10 @@ class LLMSettings(BaseModel):
     # podcast.metrics.measured_words_per_minute and docs/decisions.md
     # ("Measured words-per-minute") — of actual spoken pace from performed,
     # synthesized dialogue-mode audio: below the ~150 wpm this replaced, but
-    # above this project's own ~100-110 prior guess. Based on a single real
-    # completed episode as of this measurement — re-run
-    # measured_words_per_minute() as more real episodes accumulate.
-    words_per_minute: float = 135.8
+    # above this project's own ~100-110 prior guess. Re-measured (140.0,
+    # up from an earlier single-episode 135.8) as more real episodes
+    # accumulated — re-run measured_words_per_minute() again as more do.
+    words_per_minute: float = 140.0
 
 
 class TTSSettings(BaseModel):
@@ -374,6 +375,22 @@ class HostStance(BaseModel):
     arc: str | None = None  # how the stance shifts by the end of the segment; None = stays constant throughout
 
 
+class Transition(BaseModel):
+    """How the outline bridges from the story immediately before this one
+    into this one. `link` is only for a genuine connection (shared
+    mechanism, same person/organization, same underlying tension) — never
+    invented to force two unrelated stories together; `clean_transition` is
+    a short, neutral handoff with no claimed connection. Default to
+    `clean_transition` when unsure. See docs/decisions.md ("Outline
+    transitions")."""
+
+    kind: Literal["link", "clean_transition"]
+    # A short phrase, not full dialogue, for the script step to build the
+    # connecting/handoff lines from — the actual connection (for "link") or
+    # the framing of the handoff (for "clean_transition").
+    text_hint: str = Field(min_length=1)
+
+
 class OutlineStory(BaseModel):
     headline: str
     source_ids: list[str]  # subset of the ranked articles' source_ids this story is grounded in
@@ -381,6 +398,10 @@ class OutlineStory(BaseModel):
     # RecurringBit.effective_id of a profile.podcast.recurring_bits entry, if
     # one fits here — never the free-text name (see RecurringBit).
     recurring_bit: str | None = None
+    # How this story bridges from the one before it — None only for the
+    # first story (nothing precedes it); every later story must have one.
+    # See docs/decisions.md ("Outline transitions").
+    transition: Transition | None = None
     # Target word count for this story's segment, proportional to the
     # story's rank score. Computed in code by outline_stage after the LLM
     # call (not asked of the model) — defaults to 0 until then.

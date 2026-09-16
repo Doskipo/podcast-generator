@@ -191,6 +191,59 @@ def test_episode_cost_breakdown_reads_mocked_row_not_manifests(tmp_path, monkeyp
     assert breakdown == {("rank", "openai"): 0.01, ("tts", "elevenlabs"): 0.5}
 
 
+def test_aggregate_summary_defaults_to_real_episodes_only(tmp_path, monkeypatch):
+    _configure_test_db(monkeypatch, tmp_path)
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    now = datetime.now(timezone.utc)
+    usage = [TokenUsage(model="gpt-4o-mini", prompt_tokens=800, completion_tokens=400)]
+    _write_ranked_json(paths.EPISODES_DIR, "real-1", ["alpha"], usage)
+
+    with db.session_scope() as session:
+        session.add(db.ProfileRecord(id=1, name="Test", data={}, created_at=now, updated_at=now))
+        real = db.EpisodeRecord(episode_id="real-1", profile_id=1, status="done", created_at=now, duration_s=100.0)
+        mocked = db.EpisodeRecord(
+            episode_id="mock-1",
+            profile_id=1,
+            status="done",
+            created_at=now,
+            duration_s=120.0,
+            mocked=True,
+            mock_cost_by_stage={"rank": {"openai": 0.01}},
+            mock_topic_counts={"alpha": 2},
+        )
+        session.add(real)
+        session.add(mocked)
+        session.commit()
+
+        session.add(db.EventRecord(episode_id="real-1", type="stage_done", ts=now, metadata_json={"stage": "rank", "elapsed_s": 12.0}))
+        session.add(db.EventRecord(episode_id="mock-1", type="stage_done", ts=now, metadata_json={"stage": "rank", "elapsed_s": 8.0}, mocked=True))
+        session.commit()
+
+        default_summary = metrics.aggregate_summary(session)
+        opted_in_summary = metrics.aggregate_summary(session, include_mocked=True)
+
+    # has_mocked_data reflects the DB regardless of the current filter — the
+    # signal a caller uses to decide whether a toggle is worth showing.
+    assert default_summary.has_mocked_data is True
+    assert opted_in_summary.has_mocked_data is True
+
+    # default (include_mocked=False): only the real row counts
+    status_counts = {s.status: s.count for s in default_summary.episodes_by_status}
+    assert status_counts == {"done": 1}
+    topics = {t.interest: t.count for t in default_summary.topic_distribution}
+    assert topics == {"alpha": 1}  # only the real manifest's count, not the mocked row's
+    stage_durations = {d.stage: d for d in default_summary.avg_stage_duration_s}
+    assert stage_durations["rank"].count == 1
+    assert stage_durations["rank"].avg_elapsed_s == 12.0
+
+    # include_mocked=True: both rows count, same as the combined-view test below
+    status_counts_all = {s.status: s.count for s in opted_in_summary.episodes_by_status}
+    assert status_counts_all == {"done": 2}
+    topics_all = {t.interest: t.count for t in opted_in_summary.topic_distribution}
+    assert topics_all["alpha"] == 1 + 2
+
+
 def test_aggregate_summary_combines_real_and_mocked_episodes(tmp_path, monkeypatch):
     _configure_test_db(monkeypatch, tmp_path)
     _patch_episode_dir(monkeypatch, tmp_path)
@@ -225,7 +278,10 @@ def test_aggregate_summary_combines_real_and_mocked_episodes(tmp_path, monkeypat
         session.add(db.EventRecord(episode_id="real-2", type="failed", ts=now, metadata_json={"stage": "outline", "error": "boom"}))
         session.commit()
 
-        summary = metrics.aggregate_summary(session)
+        # explicit include_mocked=True: this test is about the combined view,
+        # not the (now real-only-by-default) default — see
+        # test_aggregate_summary_defaults_to_real_episodes_only
+        summary = metrics.aggregate_summary(session, include_mocked=True)
 
     assert summary.has_mocked_data is True
     status_counts = {s.status: s.count for s in summary.episodes_by_status}
@@ -291,5 +347,8 @@ def test_d7_retention_needs_user_tagged_play_events(tmp_path, monkeypatch):
         )
         session.commit()
 
-        summary = metrics.aggregate_summary(session)
+        # these play events are mocked (per-listener identity is mocked-only
+        # today, per _d7_retention's docstring) — need include_mocked=True to
+        # see them at all under the new real-only default
+        summary = metrics.aggregate_summary(session, include_mocked=True)
     assert summary.d7_retention == 1.0
