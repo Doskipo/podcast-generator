@@ -4,30 +4,30 @@ Given a profile of your interests, this app fetches recent news, papers, and (wh
 exists) grounded background reading, then writes and performs a two-host podcast script and
 synthesizes it into an mp3 with ElevenLabs. It's a full pipeline (fetch → rank → outline → script
 → critique → perform → tts → stitch) behind a FastAPI backend with a scheduler, a settings UI to
-edit your profile, and a metrics dashboard — not just a one-shot script. See
+edit your profile, and a metrics dashboard, not just a one-shot script. See
 [`solution.md`](solution.md) for the design write-up and [`docs/decisions.md`](docs/decisions.md)
 for the full decision log.
 
 ## Screenshots
 
-Desktop (1440×900) and mobile (390×844) — see [`docs/ui.md`](docs/ui.md#design) for the design
+Desktop (1440×900) and mobile (390×844), see [`docs/ui.md`](docs/ui.md#design) for the design
 pass these come from (palette, navigation, cards, the transcript view, etc).
 
-**Settings** — edit interests (Low/Medium/High weight), hosts, style, and schedule; one section
+**Settings.** Edit interests (Low/Medium/High weight), hosts, style, and schedule; one section
 icon per card.
 
 | Desktop | Mobile |
 |---|---|
 | ![Settings, desktop](docs/screenshots/settings-desktop.png) | ![Settings, mobile](docs/screenshots/settings-mobile.png) |
 
-**Episodes** — episode cards with the script's own title, date, duration, status, and a labelled
+**Episodes.** Episode cards with the script's own title, date, duration, status, and a labelled
 Details toggle; "Generate now" is always visible in the app shell.
 
 | Desktop | Mobile |
 |---|---|
 | ![Episodes, desktop](docs/screenshots/episodes-desktop.png) | ![Episodes, mobile](docs/screenshots/episodes-mobile.png) |
 
-**Dashboard** — cost, completion rate, retention, and per-stage breakdown, with a toggle for
+**Dashboard.** Cost, completion rate, retention, and per-stage breakdown, with a toggle for
 whether mocked demo data is included.
 
 | Desktop | Mobile |
@@ -64,7 +64,7 @@ uv run podcast serve
 
 Open [http://localhost:8000](http://localhost:8000). For frontend iteration with hot reload
 instead of a static build, run the backend and the Vite dev server separately in two terminals
-(Vite proxies API calls to `:8000` — see `docs/ui.md`):
+(Vite proxies API calls to `:8000`, see `docs/ui.md`):
 
 ```bash
 uv run podcast serve            # terminal 1 — backend on :8000
@@ -98,12 +98,11 @@ uv run podcast seed-metrics
 ```
 
 Real episodes and mocked data are kept structurally separate (mocked rows are flagged and never
-land on today's date) — see `docs/decisions.md` ("Dashboard metrics").
+land on today's date), see `docs/decisions.md` ("Dashboard metrics").
 
 ## Sample audio
 
-[`sample.mp3`](sample.mp3), at the repo root, is a real generated episode (not a synthetic demo)
-— open it directly to hear the output.
+[`sample.mp3`](sample.mp3), at the repo root, is a real generated episode (not a synthetic demo), open it directly to hear the output.
 
 ## Further reading
 
