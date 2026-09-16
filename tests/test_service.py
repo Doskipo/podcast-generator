@@ -25,10 +25,13 @@ from podcast.models import (
     CritiqueOutput,
     Episode,
     FetchOutput,
+    GroundingQuality,
     Host,
     HostStance,
     Interest,
+    JudgeScore,
     Listener,
+    NaturalnessQuality,
     Outline,
     OutlineOutput,
     OutlineStory,
@@ -36,6 +39,8 @@ from podcast.models import (
     PerformOutput,
     PodcastSettings,
     Profile,
+    QualityJudge,
+    QualityOutput,
     RankedArticle,
     RankOutput,
     Script,
@@ -171,6 +176,33 @@ def _patch_stages(monkeypatch, calls: list[str]) -> None:
             fact_flags=[],
         )
 
+    def fake_quality_stage(episode, perform_output, client=None):
+        calls.append("quality")
+        return QualityOutput(
+            episode_id=episode.episode_id,
+            generated_at=datetime.now(timezone.utc),
+            grounding=GroundingQuality(
+                source_count=1,
+                evergreen_share=0.0,
+                fact_drift_flags=0,
+                critique_flags=0,
+                critique_rewrite_rate=0.0,
+                stage_retries={"outline": False, "script": False, "critique": False, "perform": False},
+                total_retries=0,
+            ),
+            naturalness=NaturalnessQuality(
+                audio_tag_density_per_100_words=0.0,
+                interjection_or_dash_share=0.0,
+                host_balance=1.0,
+                catchphrase_count=0,
+            ),
+            judge=QualityJudge(
+                naturalness=JudgeScore(score=4, reason="reads naturally"),
+                stance_clarity=JudgeScore(score=4, reason="stances come through"),
+                model="test-model",
+            ),
+        )
+
     def fake_tts_stage(episode, perform_output, client=None):
         calls.append("tts")
         return TTSOutput(
@@ -196,6 +228,7 @@ def _patch_stages(monkeypatch, calls: list[str]) -> None:
     monkeypatch.setattr(service, "script_stage", fake_script_stage)
     monkeypatch.setattr(service, "critique_stage", fake_critique_stage)
     monkeypatch.setattr(service, "perform_stage", fake_perform_stage)
+    monkeypatch.setattr(service, "quality_stage", fake_quality_stage)
     monkeypatch.setattr(service, "tts_stage", fake_tts_stage)
     monkeypatch.setattr(service, "stitch_stage", fake_stitch_stage)
 
@@ -243,9 +276,14 @@ def test_run_episode_until_perform_stops_before_tts(tmp_path, monkeypatch):
     assert calls == ["fetch", "rank", "outline", "script", "critique", "perform"]
 
 
+def test_run_episode_until_quality_stops_before_tts(tmp_path, monkeypatch):
+    _, calls = _run(monkeypatch, tmp_path, "ep5c", until="quality")
+    assert calls == ["fetch", "rank", "outline", "script", "critique", "perform", "quality"]
+
+
 def test_run_episode_without_until_runs_the_full_pipeline(tmp_path, monkeypatch):
     _, calls = _run(monkeypatch, tmp_path, "ep6")
-    assert calls == ["fetch", "rank", "outline", "script", "critique", "perform", "tts", "stitch"]
+    assert calls == ["fetch", "rank", "outline", "script", "critique", "perform", "quality", "tts", "stitch"]
 
 
 def test_run_episode_prints_actual_feeds_count(tmp_path, monkeypatch, capsys):
@@ -264,7 +302,7 @@ def test_run_episode_emits_events_in_order(tmp_path, monkeypatch):
         ).all()
 
     types = [e.type for e in events]
-    assert types == ["generated"] + ["stage_done"] * 8 + ["completed"]
+    assert types == ["generated"] + ["stage_done"] * 9 + ["completed"]
 
 
 def test_run_episode_records_total_characters_and_cost(tmp_path, monkeypatch):
@@ -480,7 +518,7 @@ def test_resume_from_critique_runs_perform_then_tts_then_stitch(tmp_path, monkey
         record = service.get_or_create_episode_record(session, "ep14", profile_id)
         service.resume_from_critique(session, record, episode, critique_output, articles=[], until=None)
 
-    assert calls == ["perform", "tts", "stitch"]
+    assert calls == ["perform", "quality", "tts", "stitch"]
 
 
 def test_call_stage_humanizes_provider_errors_into_failure_reason(tmp_path, monkeypatch):

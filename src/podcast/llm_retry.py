@@ -21,7 +21,7 @@ def generate_with_retry(
     validate: Callable[[T], None],
     user_prompt: str,
     stage_name: str,
-) -> T:
+) -> tuple[T, bool]:
     """Call `generate(user_prompt)`, then `validate(result)` — `validate`
     raises `ValueError` on an unacceptable result, returns None otherwise
     (a side-effect-free check, not a transform). On a ValueError, retries
@@ -30,11 +30,18 @@ def generate_with_retry(
     unchanged, exactly as if there were no retry at all. Any other
     exception (an OpenAI/network error, say) is never retried here — this
     is specifically for the model producing a structurally-valid-but-wrong
-    response, not for transient call failures."""
+    response, not for transient call failures.
+
+    Returns `(result, retried)` — `retried` is True only when the first
+    attempt failed validation and the retry succeeded. Callers persist this
+    on their own Output model (e.g. `OutlineOutput.retried`) rather than
+    have a downstream consumer infer it from `len(usage)`, which the
+    perform stage's extra fact-check call makes unreliable anyway — see
+    docs/decisions.md ("Quality metrics")."""
     try:
         result = generate(user_prompt)
         validate(result)
-        return result
+        return result, False
     except ValueError as exc:
         logger.warning("%s: validation failed, retrying once with feedback: %s", stage_name, exc)
         retry_prompt = (
@@ -44,4 +51,4 @@ def generate_with_retry(
         )
         result = generate(retry_prompt)
         validate(result)
-        return result
+        return result, True

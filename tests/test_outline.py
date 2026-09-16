@@ -133,6 +133,7 @@ def test_outline_stage_persists_and_uses_cheap_model(tmp_path, monkeypatch):
     # outline uses the default (cheap) model, not the stronger script_model
     assert output.model == profile.llm.model
     assert output.model != profile.llm.script_model
+    assert output.retried is False
 
     outline_path = tmp_path / "episodes" / episode.episode_id / "outline.json"
     assert outline_path.exists()
@@ -515,6 +516,7 @@ def test_outline_stage_retries_once_then_succeeds_after_a_bad_outline(tmp_path, 
     # both attempts are billed API calls — both counted, not just the one that
     # ultimately passed validation
     assert output.usage == [_FIXTURE_USAGE, _FIXTURE_USAGE]
+    assert output.retried is True
 
 
 def test_outline_stage_raises_after_a_second_failed_validation(tmp_path, monkeypatch):

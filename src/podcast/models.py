@@ -430,6 +430,13 @@ class OutlineOutput(BaseModel):
     model: str
     outline: Outline
     usage: list[TokenUsage] = Field(default_factory=list)
+    # True iff generate_with_retry's one retry-with-feedback was needed to
+    # get a valid outline — recorded explicitly by the stage (not inferred
+    # from len(usage) downstream) since a stage can append more than one
+    # usage entry for reasons other than a retry (see PerformOutput.retried).
+    # A quality signal in its own right: a story worth grading, but not by
+    # this field alone. See docs/decisions.md ("Quality metrics").
+    retried: bool = False
 
 
 class Line(BaseModel):
@@ -473,6 +480,7 @@ class ScriptOutput(BaseModel):
     model: str
     script: Script
     usage: list[TokenUsage] = Field(default_factory=list)
+    retried: bool = False  # see OutlineOutput.retried
 
 
 class CritiqueFlag(BaseModel):
@@ -537,6 +545,7 @@ class CritiqueOutput(BaseModel):
     over_budget_segments: list[SegmentBudgetFlag]
     terse_hosts: list[HostBrevityFlag]
     usage: list[TokenUsage] = Field(default_factory=list)
+    retried: bool = False  # see OutlineOutput.retried
 
 
 class PerformedLine(BaseModel):
@@ -606,6 +615,77 @@ class PerformOutput(BaseModel):
     performance: Performance
     fact_flags: list[FactChangeFlag]
     usage: list[TokenUsage] = Field(default_factory=list)
+    # Whether the performance-writing call (not the fact-check call, which
+    # is never retried) needed generate_with_retry's one retry — see
+    # OutlineOutput.retried. Explicit, not inferred from len(usage): this
+    # stage appends a second usage entry (the fact-check call) on every
+    # normal run, which would make a len(usage)>1 heuristic wrong here.
+    retried: bool = False
+
+
+class GroundingQuality(BaseModel):
+    """Proxy signals for how well-grounded the episode is — computed from
+    existing artefacts, no new LLM call. See docs/decisions.md ("Quality
+    metrics") for why each was chosen and what it can't measure (the short
+    version: none of these can tell a *correctly* grounded claim from a
+    fluently-worded one; they only measure the pipeline's own bookkeeping
+    around sourcing and self-correction)."""
+
+    source_count: int  # distinct source_ids actually cited across the outline's stories
+    evergreen_share: float  # fraction of stories that are an evergreen primer, not fresh news
+    fact_drift_flags: int  # PerformOutput.fact_flags count — perform's own fact-check pass
+    critique_flags: int  # CritiqueOutput.critique.flags count
+    critique_rewrite_rate: float  # critique_flags / original script's line count
+    # Per-stage: did that stage need generate_with_retry's one retry? From
+    # each Output's own `retried` field (OutlineOutput.retried etc.), not
+    # inferred from usage counts — see docs/decisions.md ("Quality
+    # metrics").
+    stage_retries: dict[str, bool]
+    total_retries: int  # sum of stage_retries.values(), for a single at-a-glance number
+
+
+class NaturalnessQuality(BaseModel):
+    """Proxies for how much the performed script reads like speech rather
+    than prose read aloud — computed from performance.json's text, no new
+    LLM call. See docs/decisions.md ("Quality metrics")."""
+
+    audio_tag_density_per_100_words: float  # "[laughs]"-style inline tags per 100 words
+    interjection_or_dash_share: float  # fraction of lines opening with a disfluency or ending with an em dash
+    host_balance: float  # 0-1; 1.0 = the two hosts' mean words-per-line are equal
+    catchphrase_count: int  # recurring (2+) verbatim 4-word phrases per host, summed
+
+
+class JudgeScore(BaseModel):
+    """One axis of the quality judge's verdict."""
+
+    score: int = Field(ge=1, le=5)
+    reason: str  # one line
+
+
+class QualityJudge(BaseModel):
+    """The one new LLM call this feature adds — see docs/decisions.md
+    ("Quality metrics") for why exactly one call, on the cheap model, and
+    why these two axes specifically."""
+
+    naturalness: JudgeScore
+    stance_clarity: JudgeScore
+    model: str
+
+
+class QualityOutput(BaseModel):
+    """Typed output of the quality stage, persisted as quality.json. Runs
+    after perform, before tts — grading the text that will actually be
+    synthesized, before spending money synthesizing it. Every number here
+    is a PROXY, not a verdict — see docs/decisions.md ("Quality metrics")
+    for what each one can and can't measure; the UI must label them as
+    such, never as a pass/fail quality gate."""
+
+    episode_id: str
+    generated_at: datetime
+    grounding: GroundingQuality
+    naturalness: NaturalnessQuality
+    judge: QualityJudge
+    usage: list[TokenUsage] = Field(default_factory=list)  # the one judge call
 
 
 class TTSLine(BaseModel):

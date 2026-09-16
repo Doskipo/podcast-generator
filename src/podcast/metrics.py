@@ -23,6 +23,7 @@ from podcast.models import (
     CritiqueOutput,
     OutlineOutput,
     PerformOutput,
+    QualityOutput,
     RankOutput,
     ScriptOutput,
     StitchOutput,
@@ -175,6 +176,69 @@ class RecentFailure:
 
 
 @dataclass
+class QualityPoint:
+    """One real episode's quality.json — see quality_series() and
+    docs/decisions.md ("Quality metrics"). Every number is a PROXY, not a
+    verdict."""
+
+    episode_id: str
+    date: str  # YYYY-MM-DD, from quality.json's generated_at
+    naturalness_score: int
+    stance_clarity_score: int
+    source_count: int
+    evergreen_share: float
+    critique_flags: int
+    critique_rewrite_rate: float
+    fact_drift_flags: int
+    total_retries: int
+    audio_tag_density_per_100_words: float
+    interjection_or_dash_share: float
+    host_balance: float
+    catchphrase_count: int
+
+
+def quality_series(episodes_dir: Path | None = None) -> list[QualityPoint]:
+    """One point per real episode with a quality.json, oldest to newest —
+    the dashboard's "quality over time" section. Mocked rows never have a
+    quality.json (same "no manifest files on disk" rule mocked rows follow
+    everywhere else — see docs/decisions.md, "Dashboard metrics"), so
+    unlike the rest of this module, no separate mocked-filtering is needed
+    here: scanning the directory tree already excludes them. Episode
+    directories are named with a sortable timestamp prefix (see
+    artefacts.new_episode_id), the same ordering assumption
+    measured_words_per_minute() above already relies on."""
+    base = episodes_dir or paths.EPISODES_DIR
+    if not base.is_dir():
+        return []
+
+    points: list[QualityPoint] = []
+    for episode_dir_path in sorted(base.iterdir()):
+        quality_path = episode_dir_path / "quality.json"
+        if not quality_path.is_file():
+            continue
+        q = QualityOutput.model_validate_json(quality_path.read_text(encoding="utf-8"))
+        points.append(
+            QualityPoint(
+                episode_id=q.episode_id,
+                date=q.generated_at.date().isoformat(),
+                naturalness_score=q.judge.naturalness.score,
+                stance_clarity_score=q.judge.stance_clarity.score,
+                source_count=q.grounding.source_count,
+                evergreen_share=q.grounding.evergreen_share,
+                critique_flags=q.grounding.critique_flags,
+                critique_rewrite_rate=q.grounding.critique_rewrite_rate,
+                fact_drift_flags=q.grounding.fact_drift_flags,
+                total_retries=q.grounding.total_retries,
+                audio_tag_density_per_100_words=q.naturalness.audio_tag_density_per_100_words,
+                interjection_or_dash_share=q.naturalness.interjection_or_dash_share,
+                host_balance=q.naturalness.host_balance,
+                catchphrase_count=q.naturalness.catchphrase_count,
+            )
+        )
+    return points
+
+
+@dataclass
 class MetricsSummaryData:
     no_content: int
     episodes_by_status: list[EpisodesByStatus]
@@ -189,6 +253,7 @@ class MetricsSummaryData:
     interests_with_no_content: list[TopicCount]
     daily_series: list[DailyPoint]
     recent_failures: list[RecentFailure]
+    quality_series: list[QualityPoint]
     has_mocked_data: bool
 
 
@@ -432,5 +497,6 @@ def aggregate_summary(session: Session, include_mocked: bool = False) -> Metrics
         interests_with_no_content=interests_with_no_content,
         daily_series=daily_series,
         recent_failures=recent_failures,
+        quality_series=quality_series(),
         has_mocked_data=has_mocked_data,
     )

@@ -22,7 +22,7 @@ from podcast.api.schemas import (
     ShowNoteItem,
 )
 from podcast.artefacts import new_episode_id
-from podcast.models import CritiqueOutput, Profile, RankOutput, Script, ScriptOutput
+from podcast.models import CritiqueOutput, Profile, QualityOutput, RankOutput, Script, ScriptOutput
 from podcast.paths import episode_dir
 
 logger = logging.getLogger(__name__)
@@ -82,6 +82,16 @@ def _load_script_and_notes(episode_id: str) -> tuple[Script | None, list[ShowNot
     return script, show_notes
 
 
+def _load_quality(episode_id: str) -> QualityOutput | None:
+    """None before the quality stage has run — see QualityOutput/
+    EpisodeDetail.quality docstrings and docs/decisions.md ("Quality
+    metrics")."""
+    quality_path = episode_dir(episode_id) / "quality.json"
+    if not quality_path.exists():
+        return None
+    return QualityOutput.model_validate_json(quality_path.read_text(encoding="utf-8"))
+
+
 def _run_episode_task(profile: Profile, profile_id: int, episode_id: str, until: str | None) -> None:
     """Background-task wrapper. call_stage() has already recorded a stage
     failure (status/stage_reached/`failed` event) before re-raising, so the
@@ -133,7 +143,8 @@ def get_episode(episode_id: str, session: Session = Depends(db.get_session)) -> 
     if record is None:
         raise HTTPException(status_code=404, detail="unknown episode")
     script, show_notes = _load_script_and_notes(episode_id)
-    return EpisodeDetail(**_to_summary(record).model_dump(), script=script, show_notes=show_notes)
+    quality = _load_quality(episode_id)
+    return EpisodeDetail(**_to_summary(record).model_dump(), script=script, show_notes=show_notes, quality=quality)
 
 
 @router.get("/episodes/{episode_id}/audio")

@@ -12,6 +12,7 @@ from podcast.api.schemas import (
     DailyPointOut,
     EpisodesByStatusOut,
     MetricsSummary,
+    QualityPointOut,
     RecentFailureOut,
     StageCostOut,
     StageDurationOut,
@@ -90,6 +91,25 @@ def metrics_summary(include_mocked: bool = False, session: Session = Depends(db.
                 mocked=f.mocked,
             )
             for f in extended.recent_failures
+        ],
+        quality_series=[
+            QualityPointOut(
+                episode_id=q.episode_id,
+                date=q.date,
+                naturalness_score=q.naturalness_score,
+                stance_clarity_score=q.stance_clarity_score,
+                source_count=q.source_count,
+                evergreen_share=q.evergreen_share,
+                critique_flags=q.critique_flags,
+                critique_rewrite_rate=q.critique_rewrite_rate,
+                fact_drift_flags=q.fact_drift_flags,
+                total_retries=q.total_retries,
+                audio_tag_density_per_100_words=q.audio_tag_density_per_100_words,
+                interjection_or_dash_share=q.interjection_or_dash_share,
+                host_balance=q.host_balance,
+                catchphrase_count=q.catchphrase_count,
+            )
+            for q in extended.quality_series
         ],
         has_mocked_data=extended.has_mocked_data,
         include_mocked=include_mocked,

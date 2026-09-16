@@ -10,7 +10,7 @@ import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 
-from podcast.models import Episode, OutlineOutput, PerformOutput, RankOutput
+from podcast.models import CritiqueOutput, Episode, OutlineOutput, PerformOutput, RankOutput, ScriptOutput
 
 
 def new_episode_id(now: datetime | None = None) -> str:
@@ -36,6 +36,16 @@ def load_rank_output(dir_path: Path) -> RankOutput:
 def load_outline_output(dir_path: Path) -> OutlineOutput:
     outline_path = dir_path / "outline.json"
     return OutlineOutput.model_validate_json(outline_path.read_text(encoding="utf-8"))
+
+
+def load_script_output(dir_path: Path) -> ScriptOutput:
+    script_path = dir_path / "script.json"
+    return ScriptOutput.model_validate_json(script_path.read_text(encoding="utf-8"))
+
+
+def load_critique_output(dir_path: Path) -> CritiqueOutput:
+    critique_path = dir_path / "critique.json"
+    return CritiqueOutput.model_validate_json(critique_path.read_text(encoding="utf-8"))
 
 
 def load_perform_output(dir_path: Path) -> PerformOutput:

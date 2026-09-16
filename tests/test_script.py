@@ -142,6 +142,7 @@ def test_script_stage_persists_and_matches_model(tmp_path, monkeypatch):
     # uses the stronger model, not the default cheap one
     assert output.model == profile.llm.script_model
     assert output.model != profile.llm.model
+    assert output.retried is False
 
     script_path = tmp_path / "episodes" / episode.episode_id / "script.json"
     assert script_path.exists()
@@ -193,6 +194,7 @@ def test_script_stage_retries_once_then_succeeds_after_bad_source_ids(tmp_path, 
     assert "unknown99" in prompts[1]  # the validation error, fed back verbatim
     # both the rejected first attempt and the retry are billed calls
     assert output.usage == [_FIXTURE_USAGE, _FIXTURE_USAGE]
+    assert output.retried is True
 
 
 def test_script_stage_raises_after_a_second_failed_validation(tmp_path, monkeypatch):

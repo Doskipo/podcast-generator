@@ -339,7 +339,7 @@ def outline_stage(episode: Episode, rank_output: RankOutput, client: OpenAI | No
     def validate(outline: Outline) -> None:
         _validate_outline(outline, known_ids, profile.podcast.recurring_bits, host_names, evergreen_ids)
 
-    outline = generate_with_retry(generate, validate, user_prompt, stage_name="outline")
+    outline, retried = generate_with_retry(generate, validate, user_prompt, stage_name="outline")
 
     for i, story in enumerate(outline.stories):
         if story.transition is not None:
@@ -369,6 +369,7 @@ def outline_stage(episode: Episode, rank_output: RankOutput, client: OpenAI | No
         model=profile.llm.model,
         outline=outline,
         usage=usage,
+        retried=retried,
     )
 
     out_path = episode_dir(episode.episode_id) / "outline.json"

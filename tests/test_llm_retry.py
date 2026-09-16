@@ -1,6 +1,6 @@
 """Tests for the generic one-retry-with-feedback wrapper shared by the
-outline/script/critique stages. See docs/decisions.md ("One-retry-with-
-feedback")."""
+outline/script/critique/perform stages. See docs/decisions.md ("One-retry-
+with-feedback")."""
 
 from __future__ import annotations
 
@@ -19,9 +19,10 @@ def test_returns_the_result_when_validation_passes_first_try():
     def validate(result: str) -> None:
         pass
 
-    result = generate_with_retry(generate, validate, "the prompt", stage_name="test")
+    result, retried = generate_with_retry(generate, validate, "the prompt", stage_name="test")
 
     assert result == "ok"
+    assert retried is False
     assert calls == ["the prompt"]  # no retry needed
 
 
@@ -38,9 +39,10 @@ def test_retries_once_with_the_error_appended_to_the_prompt():
         if result == "bad":
             raise ValueError("that was wrong")
 
-    result = generate_with_retry(generate, validate, "original prompt", stage_name="test")
+    result, retried = generate_with_retry(generate, validate, "original prompt", stage_name="test")
 
     assert result == "good"
+    assert retried is True
     assert len(calls) == 2
     assert calls[0] == "original prompt"
     assert "original prompt" in calls[1]  # feedback prompt still carries the original instructions

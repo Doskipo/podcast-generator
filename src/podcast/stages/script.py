@@ -352,7 +352,7 @@ def script_stage(
     def validate(script: Script) -> None:
         validate_source_ids(script, known_ids)
 
-    script = generate_with_retry(generate, validate, user_prompt, stage_name="script")
+    script, retried = generate_with_retry(generate, validate, user_prompt, stage_name="script")
 
     output = ScriptOutput(
         episode_id=episode.episode_id,
@@ -360,6 +360,7 @@ def script_stage(
         model=profile.llm.script_model,
         script=script,
         usage=usage,
+        retried=retried,
     )
 
     out_path = episode_dir(episode.episode_id) / "script.json"

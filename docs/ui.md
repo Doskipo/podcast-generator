@@ -22,7 +22,7 @@ router prefix and stays at the root.
 |--------------|---------------------|--------------|
 | `/settings`  | `src/pages/Settings.jsx` | Edit the profile: podcast name, listener name, duration, tone; interests (topic, Low/Medium/High weight choice, description + "Suggest" button); hosts (name, persona, voice picker); style sliders/toggles (humour, depth, tangents, banter); schedule (cron field + presets). Each section `Card` carries an icon (`lucide-react`). Save → `PUT /api/profile`. |
 | `/episodes`  | `src/pages/Episodes.jsx` | Episodes as cards (title from the script — falls back to the date when there isn't one yet — duration, status, a labelled "Details" toggle), newest first. Mocked rows never appear (the backend excludes them — see "Episode list" below). Default view is `done`/`running`/`pending` only; `failed`/`no_content` sit behind a "Show failed / no content (N)" toggle, each set independently collapsing anything older than two weeks under its own "Older (N)" disclosure (`EpisodeList.jsx`). "Generate now" lives in the app shell, not this page — see "Generate now" below — and dispatches a `podcast:episode-created` window event this page listens for to refresh/restart its poll. A card's "Details" expands (lazy-loads `GET /api/episodes/{id}`) into the player (the card's hero — large play control, live time/progress bar, streaming `/api/episodes/{id}/audio`, see "Audio player" below) plus three collapsed-by-default disclosures, Transcript / Sources / About the hosts; a failed episode's card shows its human-readable `failure_reason` when one was recorded. |
-| `/dashboard` | `src/pages/Dashboard.jsx` | Loads `GET /api/metrics/summary` (once per `includeMocked` toggle — see docs/decisions.md, "dashboard mocked-data toggle") and renders a KPI row (episodes done/total, completion rate, D7 retention, cost/episode), three recharts charts (episodes & plays per day, cost by stage, topic distribution), and a recent-failures/no_content table. Shows a "mocked demo data" banner only in the opted-in mode. |
+| `/dashboard` | `src/pages/Dashboard.jsx` | Loads `GET /api/metrics/summary` (once per `includeMocked` toggle — see docs/decisions.md, "dashboard mocked-data toggle") and renders a KPI row (episodes done/total, completion rate, D7 retention, cost/episode), three recharts charts (episodes & plays per day, cost by stage, topic distribution), a recent-failures/no_content table, and a **Quality over time** card (`QualityChart` + `QualityTable` — see docs/decisions.md, "Quality metrics"; never mocked, since a mocked row can't have a `quality.json`). Shows a "mocked demo data" banner only in the opted-in mode. |
 
 `/` renders the same component as `/episodes` (default landing page) —
 `App.jsx` maps both paths to `<Episodes />` rather than issuing a redirect.
@@ -217,13 +217,31 @@ Transcript is open — see "Episode card" below.
 
 ### Episode card: hero player, collapsed sections
 
-An expanded card's `AudioPlayer` (see above) is followed by three
-`Disclosure.jsx` sections, collapsed by default: **Transcript**
-(`ScriptView`), **Sources** (`ShowNotes` — the episode's cited articles),
-and **About the hosts** (`HostBios`). Each disclosure owns its own
-open/closed state, so opening one doesn't affect the others, and every
-card starts fully collapsed — the player is what the card leads with. See
-docs/decisions.md ("Episode card: hero player, collapsed sections").
+An expanded card's `AudioPlayer` (see above) is followed by four
+`Disclosure.jsx` sections, collapsed by default: **Quality**
+(`QualityPanel` — see below), **Transcript** (`ScriptView`), **Sources**
+(`ShowNotes` — the episode's cited articles), and **About the hosts**
+(`HostBios`). Each disclosure owns its own open/closed state, so opening
+one doesn't affect the others, and every card starts fully collapsed —
+the player is what the card leads with. See docs/decisions.md ("Episode
+card: hero player, collapsed sections").
+
+### Quality panel
+
+`QualityPanel.jsx` renders `EpisodeDetail.quality` (`null` until the
+episode has reached the `quality` stage — still earlier in the pipeline,
+failed before reaching it, or predates this feature, in which case the
+panel just says so). A visible disclaimer banner at the top — "these are
+automated proxies, not a quality guarantee" — is not optional styling; the
+metrics are genuinely limited in what they can measure (see
+docs/decisions.md, "Quality metrics", for the full reasoning per metric).
+Below it: the judge's two 1-5 scores with their one-line reasons
+(`JudgeScoreBlock`), then two small stat grids — Grounding (sources,
+evergreen share, critique flags/rewrite rate, fact-drift flags, retried
+stages) and Naturalness proxies (audio-tag density, interjection/dash
+share, host balance, catchphrase count) — each less-obvious stat carrying
+a `MetricTooltip` "i" explaining what it measures and can't measure,
+reusing the same tooltip component the dashboard's KPI cards already use.
 
 ### Settings
 

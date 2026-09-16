@@ -296,7 +296,7 @@ def critique_stage(
         # deterministic, cheap to redo below with the validated critique).
         validate_source_ids(_apply_critique(original_script, critique), known_ids)
 
-    critique = generate_with_retry(generate, validate, user_prompt, stage_name="critique")
+    critique, retried = generate_with_retry(generate, validate, user_prompt, stage_name="critique")
     revised_script = _apply_critique(original_script, critique)
 
     total_words = sum(len(line.text.split()) for line in flatten_lines(revised_script))
@@ -314,6 +314,7 @@ def critique_stage(
         over_budget_segments=over_budget_segments,
         terse_hosts=terse_hosts,
         usage=usage,
+        retried=retried,
     )
 
     out_path = episode_dir(episode.episode_id) / "critique.json"

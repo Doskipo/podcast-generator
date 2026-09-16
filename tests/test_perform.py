@@ -169,6 +169,7 @@ def test_perform_stage_persists_performance_json(tmp_path, monkeypatch):
     reparsed = perform_module.PerformOutput.model_validate_json(performance_path.read_text(encoding="utf-8"))
     assert reparsed.performance.segments[0].lines[0].text == "So get THIS —"
     assert output.fact_flags == []
+    assert output.retried is False
 
 
 def test_perform_stage_overwrites_headline_and_source_ids_from_original(tmp_path, monkeypatch):
@@ -314,6 +315,7 @@ def test_perform_stage_retries_when_over_word_cap_then_succeeds(tmp_path, monkey
     assert len(prompts) == 2
     assert "word cap" in prompts[1]  # the validation error, fed back verbatim
     assert output.performance.segments[0].lines[0].text == "So get THIS —"
+    assert output.retried is True
 
 
 def test_validate_word_cap_rejects_over_10_percent_overrun():
@@ -363,6 +365,7 @@ def test_perform_stage_retries_once_then_succeeds(tmp_path, monkeypatch):
     assert "Carol" in prompts[1]  # the validation error, fed back verbatim
     # both the rejected first attempt, the retry, and the fact-check call are billed
     assert output.usage == [_FIXTURE_USAGE, _FIXTURE_USAGE, _FIXTURE_USAGE]
+    assert output.retried is True
 
 
 def test_perform_stage_raises_after_second_failed_validation(tmp_path, monkeypatch):

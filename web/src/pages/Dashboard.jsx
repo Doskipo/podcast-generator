@@ -5,6 +5,8 @@ import CostByStageChart from '../components/dashboard/CostByStageChart.jsx'
 import EpisodesPlaysChart from '../components/dashboard/EpisodesPlaysChart.jsx'
 import KpiCard from '../components/dashboard/KpiCard.jsx'
 import MockedBadge from '../components/dashboard/MockedBadge.jsx'
+import QualityChart from '../components/dashboard/QualityChart.jsx'
+import QualityTable from '../components/dashboard/QualityTable.jsx'
 import RecentFailuresTable from '../components/dashboard/RecentFailuresTable.jsx'
 import TopicDistributionChart from '../components/dashboard/TopicDistributionChart.jsx'
 
@@ -168,6 +170,25 @@ export default function Dashboard() {
               this week" (fine) from "the OpenAI key expired" (not fine).
             </p>
             <RecentFailuresTable failures={summary.recent_failures} />
+          </Card>
+
+          <Card title="Quality over time">
+            <p className="mb-2 text-xs text-ink/55">
+              Automated proxies computed from each episode's own artefacts, plus one cheap-model judge — grounding,
+              spoken-language patterns, and a 1-5 naturalness/stance-clarity score. Proxies, not a quality guarantee
+              — see each metric's "i" for what it can't measure. Never mocked: only real episodes appear here.
+            </p>
+            {summary.quality_series.length === 0 ? (
+              <p className="text-sm text-ink/55">
+                No quality data yet — it's computed once an episode reaches the quality stage (after perform, before
+                tts).
+              </p>
+            ) : (
+              <div className="space-y-4">
+                <QualityChart data={summary.quality_series} />
+                <QualityTable points={summary.quality_series} />
+              </div>
+            )}
           </Card>
         </>
       )}

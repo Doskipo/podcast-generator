@@ -4,6 +4,7 @@ import { api } from '../api.js'
 import AudioPlayer from './AudioPlayer.jsx'
 import Disclosure from './Disclosure.jsx'
 import HostBios from './HostBios.jsx'
+import QualityPanel from './QualityPanel.jsx'
 import ScriptView from './ScriptView.jsx'
 import ShowNotes from './ShowNotes.jsx'
 import StatusBadge from './StatusBadge.jsx'
@@ -124,6 +125,10 @@ export default function EpisodeCard({ episode, hosts }) {
               {detail.status !== 'done' && detail.status !== 'no_content' && detail.status !== 'failed' && (
                 <p className="text-sm text-ink/55">Audio not ready yet ({detail.status}).</p>
               )}
+
+              <Disclosure label="Quality">
+                <QualityPanel quality={detail.quality} />
+              </Disclosure>
 
               <Disclosure label="Transcript">
                 <ScriptView script={detail.script} hosts={hosts} />

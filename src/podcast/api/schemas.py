@@ -9,7 +9,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from podcast.models import Script
+from podcast.models import QualityOutput, Script
 
 
 class EpisodeCreateRequest(BaseModel):
@@ -57,6 +57,11 @@ class ShowNoteItem(BaseModel):
 class EpisodeDetail(EpisodeSummary):
     script: Script | None = None
     show_notes: list[ShowNoteItem] = Field(default_factory=list)
+    # None until the quality stage has run (still earlier in the pipeline,
+    # failed before reaching it, or predates this feature). Every number in
+    # here is a PROXY — see docs/decisions.md ("Quality metrics") — the UI
+    # must label them as such, never as a pass/fail verdict.
+    quality: QualityOutput | None = None
 
 
 class EventIn(BaseModel):
@@ -111,6 +116,28 @@ class RecentFailureOut(BaseModel):
     mocked: bool
 
 
+class QualityPointOut(BaseModel):
+    """One real (non-mocked) episode's quality.json, for the dashboard's
+    "over time" section — see podcast.metrics.quality_series and
+    docs/decisions.md ("Quality metrics"). Every number is a PROXY, not a
+    verdict."""
+
+    episode_id: str
+    date: str  # YYYY-MM-DD, from quality.json's generated_at
+    naturalness_score: int
+    stance_clarity_score: int
+    source_count: int
+    evergreen_share: float
+    critique_flags: int
+    critique_rewrite_rate: float
+    fact_drift_flags: int
+    total_retries: int
+    audio_tag_density_per_100_words: float
+    interjection_or_dash_share: float
+    host_balance: float
+    catchphrase_count: int
+
+
 class MetricsSummary(BaseModel):
     total_episodes: int
     done: int
@@ -136,6 +163,11 @@ class MetricsSummary(BaseModel):
     interests_with_no_content: list[TopicCountOut]
     daily_series: list[DailyPointOut]
     recent_failures: list[RecentFailureOut]
+    # Oldest-to-newest, one point per real episode with a quality.json — see
+    # podcast.metrics.quality_series and docs/decisions.md ("Quality
+    # metrics"). Unaffected by include_mocked below (mocked rows never have
+    # a quality.json — quality metrics are never mocked).
+    quality_series: list[QualityPointOut]
     has_mocked_data: bool
     # Echoes the request's `include_mocked` query param — the single source
     # of truth for which mode produced these numbers, so the frontend never

@@ -13,10 +13,15 @@ from sqlmodel import SQLModel, create_engine
 from podcast import db, metrics, paths
 from podcast.models import (
     Article,
+    GroundingQuality,
+    JudgeScore,
+    NaturalnessQuality,
     Performance,
     PerformedLine,
     PerformedSegment,
     PerformOutput,
+    QualityJudge,
+    QualityOutput,
     RankedArticle,
     RankOutput,
     StitchOutput,
@@ -150,6 +155,79 @@ def test_measured_words_per_minute_ignores_episodes_missing_either_file(tmp_path
 def test_measured_words_per_minute_returns_none_when_no_qualifying_episode(tmp_path, monkeypatch):
     _patch_episode_dir(monkeypatch, tmp_path)
     assert metrics.measured_words_per_minute() is None
+
+
+def _write_quality_json(episodes_dir: Path, episode_id: str, naturalness_score: int, generated_at: datetime) -> None:
+    d = episodes_dir / episode_id
+    d.mkdir(parents=True, exist_ok=True)
+    output = QualityOutput(
+        episode_id=episode_id,
+        generated_at=generated_at,
+        grounding=GroundingQuality(
+            source_count=2,
+            evergreen_share=0.0,
+            fact_drift_flags=1,
+            critique_flags=3,
+            critique_rewrite_rate=0.25,
+            stage_retries={"outline": False, "script": True, "critique": False, "perform": False},
+            total_retries=1,
+        ),
+        naturalness=NaturalnessQuality(
+            audio_tag_density_per_100_words=2.5, interjection_or_dash_share=0.3, host_balance=0.9, catchphrase_count=2
+        ),
+        judge=QualityJudge(
+            naturalness=JudgeScore(score=naturalness_score, reason="r"),
+            stance_clarity=JudgeScore(score=4, reason="r"),
+            model="gpt-4o-mini",
+        ),
+    )
+    (d / "quality.json").write_text(output.model_dump_json(), encoding="utf-8")
+
+
+def test_quality_series_reads_every_episodes_quality_json(tmp_path, monkeypatch):
+    _patch_episode_dir(monkeypatch, tmp_path)
+    now = datetime.now(timezone.utc)
+    _write_quality_json(paths.EPISODES_DIR, "ep1", naturalness_score=4, generated_at=now)
+    _write_quality_json(paths.EPISODES_DIR, "ep2", naturalness_score=2, generated_at=now)
+
+    points = metrics.quality_series()
+
+    assert {p.episode_id for p in points} == {"ep1", "ep2"}
+    ep1 = next(p for p in points if p.episode_id == "ep1")
+    assert ep1.naturalness_score == 4
+    assert ep1.stance_clarity_score == 4
+    assert ep1.source_count == 2
+    assert ep1.critique_flags == 3
+    assert ep1.critique_rewrite_rate == 0.25
+    assert ep1.fact_drift_flags == 1
+    assert ep1.total_retries == 1
+    assert ep1.host_balance == 0.9
+    assert ep1.date == now.date().isoformat()
+
+
+def test_quality_series_skips_episodes_without_quality_json(tmp_path, monkeypatch):
+    _patch_episode_dir(monkeypatch, tmp_path)
+    (paths.EPISODES_DIR / "ep-no-quality").mkdir(parents=True, exist_ok=True)
+    assert metrics.quality_series() == []
+
+
+def test_quality_series_empty_when_episodes_dir_missing(tmp_path, monkeypatch):
+    _patch_episode_dir(monkeypatch, tmp_path)  # EPISODES_DIR points at a tmp dir that's never created
+    assert metrics.quality_series() == []
+
+
+def test_aggregate_summary_includes_quality_series(tmp_path, monkeypatch):
+    _configure_test_db(monkeypatch, tmp_path)
+    _patch_episode_dir(monkeypatch, tmp_path)
+    now = datetime.now(timezone.utc)
+    _write_quality_json(paths.EPISODES_DIR, "ep1", naturalness_score=5, generated_at=now)
+
+    with db.session_scope() as session:
+        summary = metrics.aggregate_summary(session)
+
+    assert len(summary.quality_series) == 1
+    assert summary.quality_series[0].episode_id == "ep1"
+    assert summary.quality_series[0].naturalness_score == 5
 
 
 def test_estimate_openai_cost_uses_known_model_pricing():

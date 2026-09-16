@@ -1621,6 +1621,131 @@ the native `<audio controls>`, sitting flush against always-visible Show notes/T
 - Nothing else about the card (header, status badge, Details toggle, the status-filter/mocked-
   exclusion behavior from the previous pass) changed.
 
+## Quality metrics — 2026-09-16
+Every other stage produces something a human eventually listens to or reads; nothing in the
+pipeline said anything about whether the *result* was any good. Added a `quality` stage —
+between perform and tts, grading the text that's about to be synthesized before spending money
+synthesizing it — computing proxy metrics from the artefacts already on disk, plus exactly one
+new LLM call (a cheap-model judge). `QualityOutput` persists as `quality.json`; every field is
+labelled a PROXY in its own docstring, the API schema, and the UI, on purpose — see "Why proxies,
+not a verdict" below for why that label matters as much as the numbers.
+
+### Grounding — why each metric, and what it can't measure
+- **`source_count`** (distinct `source_ids` across the outline's stories, not the size of the
+  rank-stage candidate pool): counts what the episode actually *used*, not what was available.
+  Can't measure whether those sources were used *correctly* — a episode citing 5 sources
+  superficially scores higher than one citing 2 sources well.
+- **`evergreen_share`** (fraction of stories that are a Wikipedia primer, not fresh news, from
+  `OutlineStory.is_primer`): a high share means an interest keeps coming up empty of fresh
+  content, not that the episode is bad — it's a *feed-health* signal riding along on the quality
+  stage because the data was already there, not a naturalness/correctness measure at all.
+- **`fact_drift_flags`** (`PerformOutput.fact_flags` count) and **`critique_flags`** /
+  **`critique_rewrite_rate`** (`CritiqueOutput.critique.flags` count / original line count):
+  these measure how much *self-correction the pipeline's own review stages already did*, not the
+  residual error rate in the final output — a script with zero flags could still contain a claim
+  neither critique nor the fact-checker happened to catch, and a heavily-flagged-then-fixed
+  script is indistinguishable here from one that needed no fixes at all.
+- **`stage_retries`** (per stage: `OutlineOutput.retried`, `ScriptOutput.retried`,
+  `CritiqueOutput.retried`, `PerformOutput.retried`) — recorded **explicitly** by each stage from
+  `generate_with_retry`'s own return value, not inferred from `len(usage)` downstream: `perform`
+  appends a second usage entry (the fact-check call) on every normal run regardless of whether
+  the performance-write itself retried, which would make a `len(usage) > 1` heuristic silently
+  wrong specifically for that stage. `generate_with_retry` now returns `(result, retried)`, and
+  `retried` is the one thing this metric can say — it can't say *why* a stage retried (a genuine
+  model mistake vs. a schema edge case) or whether the retry actually produced a better result
+  than the first attempt would have.
+
+### Naturalness proxies — why each metric, and what it can't measure
+- **`audio_tag_density_per_100_words`** (`[laughs]`-style inline tags in performed text, per 100
+  words): a density near zero across a whole episode suggests the performance pass under-used
+  the tool it was explicitly told to use; it can't measure whether a *present* tag was placed
+  well or landed at the right moment.
+- **`interjection_or_dash_share`** (fraction of lines opening with one of script.py's own
+  disfluency/interjection vocabulary — "wait", "hold on", "i mean", "no?", "okay so", "look" — or
+  ending in an em dash): deliberately reuses the *exact* words the script prompt already asks
+  for, not an external naturalness wordlist, so this measures whether the pipeline followed its
+  own instruction, not naturalness in general — a genuinely natural line using different words
+  scores as "no interjection" here.
+- **`host_balance`** (`min/max` of the two hosts' mean words-per-line performed; 1.0 = even):
+  can't tell a deliberately economical host persona from a host the script is actually
+  neglecting — a persona explicitly briefed as terse will always score as "imbalanced" here, by
+  design of that persona, not by any fault in the script.
+- **`catchphrase_count`** (a host's own 4-word phrases that recur verbatim 2+ times across the
+  episode): an *emergent*-repetition proxy, not a check against a configured catchphrase list —
+  hosts have no such field today, and adding one felt like solving a UI problem to answer a
+  metrics question. Two known quirks: a single repeated phrase longer than 4 words produces
+  multiple overlapping recurring windows (a repeated 5-word phrase counts as 2, not 1 — see
+  `tests/test_quality.py`'s catchphrase test for a worked example), and it can't distinguish a
+  deliberate running bit (which should sound natural, even good) from unintentional
+  repetitiveness (which shouldn't) — the number goes up for both.
+
+### The judge — one call, two axes, why these two
+`podcast/stages/quality.py:_generate_judge` — `profile.llm.model` (the cheap model, not
+`script_model`), one direct `chat.completions.parse` call, no `generate_with_retry`: the
+constraint was *no new LLM calls except one cheap judge*, and a retry would make it two. Pydantic
+`Field(ge=1, le=5)` on `JudgeScore.score` leans on structured outputs' own schema enforcement
+(the same pattern `rank.ArticleScore` already uses for its `0.0-1.0` score) rather than a
+second validation-and-retry round trip.
+- **naturalness** and **stance_clarity** specifically, not a single "quality" score: a single
+  number would hide *which* dimension is weak, and this pipeline already has two structurally
+  distinct failure modes worth telling apart — a script that reads naturally but where nobody's
+  stance actually comes through (outline's stances were ignored) is a different bug from one
+  that's flat and written-sounding but technically on-message.
+- **One cheap-model opinion, not ground truth.** The judge is `gpt-4o-mini` (or whatever
+  `profile.llm.model` is configured to) grading `gpt-4o`'s (or `script_model`'s) output — a
+  weaker model judging a stronger one, with no second opinion, no calibration set, and no
+  agreement-with-humans measurement done here. Treat a 4/5 as "a cheap model didn't object
+  loudly," not as "a human would rate this 4 out of 5."
+
+### Why proxies, not a verdict
+None of the above adds up to "this episode is good" — they're bookkeeping about the pipeline's
+own process (how much it had to correct itself, whether it followed its own stylistic
+instructions) plus one inexpensive, uncalibrated opinion. The UI is required to label them as
+proxies everywhere they appear (`QualityPanel`'s disclaimer banner, the dashboard's "Quality over
+time" card copy, every schema docstring) specifically so a string of 4/5s doesn't get quietly
+read as "verified good" — the reasons text next to each judge score exists so a person still has
+to read a sentence, not just glance at a number.
+
+### Where it runs, and how every entrypoint reaches it
+Inserted between `perform` and `tts` in `generate.py`'s `STAGES` (now `... perform, quality, tts,
+stitch`) and in `service.py`'s `_step_quality`, called right after every one of the seven places
+`perform_output` is obtained (`_run_outline_through_perform`, and each of
+`resume_from_outline`/`resume_from_script`/`resume_from_critique`/`resume_from_performance`).
+`quality_stage(episode, perform_output, client=None)` deliberately takes only `perform_output` —
+it reads `outline.json`, `script.json`, and `critique.json` directly from `episode_dir` rather
+than having every caller thread three more objects through, since all three are guaranteed to
+exist by the time perform has succeeded (perform requires critique, critique requires
+outline/script). This is what lets `resume_from_performance` — which has no `CritiqueOutput` or
+`OutlineOutput` in scope at all, only the given `PerformOutput` — call the exact same function
+as every other entrypoint.
+
+### Dashboard and episode card
+`GET /api/episodes/{id}` gained `quality: QualityOutput | None` (`EpisodeDetail`), loaded from
+`quality.json` when present. `GET /api/metrics/summary` gained `quality_series`
+(`podcast.metrics.quality_series()`, one point per real episode with a `quality.json`, scanning
+`data/episodes/*/` directly — the same "scan the directory, don't touch the DB" pattern
+`measured_words_per_minute()` already uses, and correct here for a stronger reason: a mocked row
+can *never* have a `quality.json` (mocked rows have no manifest files on disk at all), so unlike
+the rest of `aggregate_summary`, no separate mocked-filtering was needed — scanning real episode
+directories already excludes them by construction. `EpisodeCard.jsx` gained a fourth disclosure,
+**Quality** (`QualityPanel.jsx`), positioned right after the player and before
+Transcript/Sources/About the hosts. The dashboard gained a **Quality over time** card
+(`QualityChart.jsx` — the two judge scores, per episode — plus `QualityTable.jsx` for the rest of
+the proxies), both carrying the "these are proxies" framing verbatim.
+
+### Verified against real data, not just fixtures
+Ran the real `quality_stage` (real OpenAI judge call, `.env`'s key) directly against two already-
+completed real episodes' persisted artefacts (bypassing `service.py` entirely — calling the
+stage function directly — specifically so this didn't touch either episode's DB row/status; a
+resume through `service.py` would have reset a `"done"` episode back to `"running"`, which the
+previous session's `mark_interrupted_episodes` startup sweep would then have wrongly flagged as
+failed on the next restart). Both real runs produced coherent, specific judge reasons naming the
+actual hosts and stories, and grounding/naturalness numbers that matched a hand-checked
+recomputation. Also surfaced a real, useful side effect: the earlier session's "Interrupted —
+the server restarted..." resilience message and the ElevenLabs `quota_exceeded`-as-401 failure
+reason both showed up correctly in the same dashboard view, confirming those two features and
+this one compose cleanly.
+
 ## Future work.
 - Add **suggest topics from previous episodes** from the previous podcasts. So it generatos a topic 
 (or a bunch of topics) for a podcast for you.

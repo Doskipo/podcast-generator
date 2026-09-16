@@ -314,7 +314,7 @@ def perform_stage(
     def validate(performance: Performance) -> None:
         _validate_performance(performance, original_script, known_speakers)
 
-    performance = generate_with_retry(generate, validate, user_prompt, stage_name="perform")
+    performance, retried = generate_with_retry(generate, validate, user_prompt, stage_name="perform")
     performance = _apply_grounding(performance, original_script)
     validate_performed_source_ids(performance, known_ids)
 
@@ -330,6 +330,7 @@ def perform_stage(
         performance=performance,
         fact_flags=fact_flags,
         usage=usage,
+        retried=retried,
     )
 
     out_path = episode_dir(episode.episode_id) / "performance.json"

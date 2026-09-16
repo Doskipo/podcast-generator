@@ -47,6 +47,7 @@ from podcast.stages.critique import critique_stage
 from podcast.stages.fetch import fetch_stage
 from podcast.stages.outline import outline_stage
 from podcast.stages.perform import perform_stage
+from podcast.stages.quality import quality_stage
 from podcast.stages.rank import rank_stage
 from podcast.stages.script import script_stage
 from podcast.stages.stitch import stitch_stage
@@ -374,12 +375,44 @@ def _step_perform(
     return None if until == "perform" else perform_output
 
 
+def _step_quality(
+    session: Session, record: db.EpisodeRecord, episode: Episode, perform_output: PerformOutput, until: str | None
+) -> PerformOutput | None:
+    """Computes and persists quality.json (proxy grounding/naturalness
+    metrics plus the one cheap-model judge call — see
+    podcast.stages.quality and docs/decisions.md, "Quality metrics"), then
+    passes `perform_output` through unchanged: every caller only needs
+    perform_output to continue to tts, quality_output itself isn't
+    consumed further in this module. Returns None only when
+    `until == "quality"` stops the pipeline here."""
+    quality_output = call_stage(
+        session,
+        record,
+        "quality",
+        lambda: quality_stage(episode, perform_output),
+        extra_metadata=lambda r: {
+            "naturalness_score": r.judge.naturalness.score,
+            "stance_clarity_score": r.judge.stance_clarity.score,
+            "critique_rewrite_rate": r.grounding.critique_rewrite_rate,
+            "total_retries": r.grounding.total_retries,
+        },
+    )
+    g = quality_output.grounding
+    print(
+        f"episode {episode.episode_id}: quality — naturalness {quality_output.judge.naturalness.score}/5, "
+        f"stance clarity {quality_output.judge.stance_clarity.score}/5 (proxies, not a verdict — see "
+        f"docs/decisions.md); {g.critique_flags} critique flag(s), {g.fact_drift_flags} fact-drift flag(s), "
+        f"{g.total_retries} stage retry/ies"
+    )
+    return None if until == "quality" else perform_output
+
+
 def _run_outline_through_perform(
     session: Session, record: db.EpisodeRecord, episode: Episode, rank_output: RankOutput, until: str | None
 ) -> PerformOutput | None:
-    """outline -> script -> critique -> perform, stopping early if `until`
-    names one of those stages. Shared by every entrypoint that starts at or
-    before outline."""
+    """outline -> script -> critique -> perform -> quality, stopping early
+    if `until` names one of those stages. Shared by every entrypoint that
+    starts at or before outline."""
     outline_output = _step_outline(session, record, episode, rank_output, until)
     if outline_output is None:
         return None
@@ -392,7 +425,11 @@ def _run_outline_through_perform(
     if critique_output is None:
         return None
 
-    return _step_perform(session, record, episode, critique_output, rank_output.selected, until)
+    perform_output = _step_perform(session, record, episode, critique_output, rank_output.selected, until)
+    if perform_output is None:
+        return None
+
+    return _step_quality(session, record, episode, perform_output, until)
 
 
 def _run_tts_and_stitch(
@@ -511,7 +548,7 @@ def resume_from_fetch(
 def resume_from_rank(
     session: Session, record: db.EpisodeRecord, episode: Episode, rank_output: RankOutput, until: str | None
 ) -> str:
-    """rank_output already in hand: outline -> script -> critique -> perform -> tts -> stitch."""
+    """rank_output already in hand: outline -> script -> critique -> perform -> quality -> tts -> stitch."""
     record.status = "running"
     session.add(record)
     session.commit()
@@ -541,7 +578,7 @@ def resume_from_outline(
     rank_output: RankOutput,
     until: str | None,
 ) -> str:
-    """outline_output already in hand: script -> critique -> perform -> tts -> stitch."""
+    """outline_output already in hand: script -> critique -> perform -> quality -> tts -> stitch."""
     record.status = "running"
     session.add(record)
     session.commit()
@@ -556,6 +593,10 @@ def resume_from_outline(
         return episode.episode_id
 
     perform_output = _step_perform(session, record, episode, critique_output, rank_output.selected, until)
+    if perform_output is None:
+        return episode.episode_id
+
+    perform_output = _step_quality(session, record, episode, perform_output, until)
     if perform_output is None:
         return episode.episode_id
 
@@ -577,7 +618,7 @@ def resume_from_script(
     outline_output: OutlineOutput,
     until: str | None,
 ) -> str:
-    """script_output already in hand: critique -> perform -> tts -> stitch."""
+    """script_output already in hand: critique -> perform -> quality -> tts -> stitch."""
     record.status = "running"
     session.add(record)
     session.commit()
@@ -588,6 +629,10 @@ def resume_from_script(
         return episode.episode_id
 
     perform_output = _step_perform(session, record, episode, critique_output, rank_output.selected, until)
+    if perform_output is None:
+        return episode.episode_id
+
+    perform_output = _step_quality(session, record, episode, perform_output, until)
     if perform_output is None:
         return episode.episode_id
 
@@ -608,7 +653,7 @@ def resume_from_critique(
     articles: list[Article],
     until: str | None,
 ) -> str:
-    """critique_output already in hand: perform -> tts -> stitch. `articles`
+    """critique_output already in hand: perform -> quality -> tts -> stitch. `articles`
     (the episode's selected/ranked articles) is needed by perform_stage to
     re-check grounding on the performed text."""
     record.status = "running"
@@ -617,6 +662,10 @@ def resume_from_critique(
     start = time.monotonic()
 
     perform_output = _step_perform(session, record, episode, critique_output, articles, until)
+    if perform_output is None:
+        return episode.episode_id
+
+    perform_output = _step_quality(session, record, episode, perform_output, until)
     if perform_output is None:
         return episode.episode_id
 
@@ -632,11 +681,15 @@ def resume_from_critique(
 def resume_from_performance(
     session: Session, record: db.EpisodeRecord, episode: Episode, perform_output: PerformOutput, until: str | None
 ) -> str:
-    """perform_output already in hand: tts -> stitch."""
+    """perform_output already in hand: quality -> tts -> stitch."""
     record.status = "running"
     session.add(record)
     session.commit()
     start = time.monotonic()
+
+    perform_output = _step_quality(session, record, episode, perform_output, until)
+    if perform_output is None:
+        return episode.episode_id
 
     result = _run_tts_and_stitch(session, record, episode, perform_output, until)
     if result is None:

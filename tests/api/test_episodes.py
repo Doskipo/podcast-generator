@@ -21,11 +21,16 @@ from podcast.models import (
     Article,
     Critique,
     CritiqueOutput,
+    GroundingQuality,
     Host,
     Interest,
+    JudgeScore,
     Listener,
+    NaturalnessQuality,
     PodcastSettings,
     Profile,
+    QualityJudge,
+    QualityOutput,
     RankOutput,
     Script,
     Style,
@@ -204,6 +209,52 @@ def test_get_episode_detail_has_script_and_show_notes_once_done(tmp_path, monkey
     assert detail["status"] == "done"
     assert detail["script"]["title"] == "t"
     assert detail["show_notes"] == [{"title": "A Great Article", "url": "https://example.com/a1", "source": "curated"}]
+    assert detail["quality"] is None  # the fake pipeline never wrote quality.json
+
+
+def test_get_episode_detail_includes_quality_when_quality_json_exists(tmp_path, monkeypatch):
+    _configure_test_db(monkeypatch, tmp_path)
+    _patch_episode_dir(monkeypatch, tmp_path)
+    monkeypatch.setattr(service, "run_episode", _fake_run_episode_success)
+
+    with TestClient(app) as client:
+        _seed_profile(client)
+        episode_id = client.post("/api/episodes", json={}).json()["episode_id"]
+
+        quality_output = QualityOutput(
+            episode_id=episode_id,
+            generated_at=datetime.now(timezone.utc),
+            grounding=GroundingQuality(
+                source_count=1,
+                evergreen_share=0.0,
+                fact_drift_flags=0,
+                critique_flags=0,
+                critique_rewrite_rate=0.0,
+                stage_retries={"outline": False, "script": False, "critique": False, "perform": False},
+                total_retries=0,
+            ),
+            naturalness=NaturalnessQuality(
+                audio_tag_density_per_100_words=1.5,
+                interjection_or_dash_share=0.2,
+                host_balance=0.8,
+                catchphrase_count=1,
+            ),
+            judge=QualityJudge(
+                naturalness=JudgeScore(score=4, reason="reads naturally"),
+                stance_clarity=JudgeScore(score=3, reason="a bit flat for Max"),
+                model="gpt-4o-mini",
+            ),
+        )
+        (paths.episode_dir(episode_id) / "quality.json").write_text(
+            quality_output.model_dump_json(), encoding="utf-8"
+        )
+
+        detail_resp = client.get(f"/api/episodes/{episode_id}")
+
+    detail = detail_resp.json()
+    assert detail["quality"]["judge"]["naturalness"]["score"] == 4
+    assert detail["quality"]["judge"]["stance_clarity"]["reason"] == "a bit flat for Max"
+    assert detail["quality"]["naturalness"]["host_balance"] == 0.8
 
 
 def test_get_episode_detail_unknown_id_is_404(tmp_path, monkeypatch):

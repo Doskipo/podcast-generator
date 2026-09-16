@@ -355,6 +355,7 @@ def test_critique_stage_retries_once_then_succeeds_after_bad_grounding(tmp_path,
     assert "unknown-id-xyz" in prompts[1]  # the validation error, fed back verbatim
     # both the rejected first attempt and the retry are billed calls
     assert output.usage == [_FIXTURE_USAGE, _FIXTURE_USAGE]
+    assert output.retried is True
 
 
 def test_critique_stage_raises_after_a_second_failed_validation(tmp_path, monkeypatch):
