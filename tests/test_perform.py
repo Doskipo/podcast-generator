@@ -11,15 +11,21 @@ from pathlib import Path
 import pytest
 
 from podcast.models import (
+    Angle,
     Article,
     Critique,
     CritiqueOutput,
     Episode,
     FactChangeFlag,
     Host,
+    HostMood,
+    HostStance,
     Interest,
     Line,
     Listener,
+    Outline,
+    OutlineOutput,
+    OutlineStory,
     Performance,
     PerformedLine,
     PerformedSegment,
@@ -129,13 +135,43 @@ def _valid_performance(extra_cold_open: bool = True) -> Performance:
     )
 
 
-def _patch_episode_dir(monkeypatch, tmp_path: Path) -> None:
+def _host_moods() -> list[HostMood]:
+    return [
+        HostMood(host="Nova", mood="playful", reason="today's stories lean silly"),
+        HostMood(host="Max", mood="tired-but-sharp", reason="up late double-checking a stat"),
+    ]
+
+
+def _write_outline_json(dir_path: Path, episode_id: str, host_moods: list[HostMood] | None = None) -> None:
+    """perform_stage now reads outline.json off disk (for host_moods) the
+    same way quality_stage does — every perform test needs one present."""
+    outline = Outline(
+        title="t",
+        host_moods=_host_moods() if host_moods is None else host_moods,
+        stories=[
+            OutlineStory(
+                headline="s",
+                source_ids=["abcd1234"],
+                angle=Angle(why_it_matters="w", tension_or_surprise="t", host_take="h", tangent=None),
+                stances=[
+                    HostStance(host="Nova", attitude="excited", why="her home turf"),
+                    HostStance(host="Max", attitude="skeptical", why="wants the numbers"),
+                ],
+            )
+        ],
+    )
+    output = OutlineOutput(episode_id=episode_id, generated_at=datetime.now(timezone.utc), model="gpt-4o-mini", outline=outline)
+    (dir_path / "outline.json").write_text(output.model_dump_json(), encoding="utf-8")
+
+
+def _patch_episode_dir(monkeypatch, tmp_path: Path, episode_id: str = "ep1") -> None:
     def _episode_dir(episode_id: str) -> Path:
         d = tmp_path / "episodes" / episode_id
         d.mkdir(parents=True, exist_ok=True)
         return d
 
     monkeypatch.setattr(perform_module, "episode_dir", _episode_dir)
+    _write_outline_json(_episode_dir(episode_id), episode_id)
 
 
 def _patch_generation(monkeypatch, performance: Performance, fact_flags: list[FactChangeFlag] | None = None):
@@ -464,7 +500,7 @@ def test_build_performance_prompts_includes_all_six_rules():
     profile = _profile()
     original = _original_script("abcd1234")
 
-    system_prompt, _user_prompt = perform_module._build_performance_prompts(profile, original)
+    system_prompt, _user_prompt = perform_module._build_performance_prompts(profile, original, _host_moods())
 
     assert "continuing thought" in system_prompt  # rule 1
     assert "connectors" in system_prompt  # rule 2
@@ -472,6 +508,50 @@ def test_build_performance_prompts_includes_all_six_rules():
     assert "ARC" in system_prompt  # rule 4
     assert "same sentence contour" in system_prompt  # rule 5
     assert "chit-chat" in system_prompt  # rule 6
+
+
+def test_build_performance_prompts_includes_moods_and_tendency_framing():
+    profile = _profile()
+    original = _original_script("abcd1234")
+
+    system_prompt, _user_prompt = perform_module._build_performance_prompts(profile, original, _host_moods())
+
+    assert "Mood this episode: playful — today's stories lean silly" in system_prompt
+    assert "Mood this episode: tired-but-sharp — up late double-checking a stat" in system_prompt
+    assert "not a script of fixed lines to reuse" in system_prompt
+
+
+def test_build_performance_prompts_omits_mood_line_when_no_host_moods():
+    profile = _profile()
+    original = _original_script("abcd1234")
+
+    system_prompt, _user_prompt = perform_module._build_performance_prompts(profile, original, [])
+
+    assert "Mood this episode" not in system_prompt
+
+
+def test_perform_stage_reads_moods_from_outline_json(tmp_path, monkeypatch):
+    profile = _profile()
+    episode = _episode(profile)
+    articles = [_article("abcd1234")]
+    critique_output = _critique_output(episode.episode_id, "abcd1234")
+
+    system_prompts: list[str] = []
+
+    def fake_generate_performance(client, model, system_prompt, user_prompt):
+        system_prompts.append(system_prompt)
+        return _valid_performance(), _FIXTURE_USAGE
+
+    def fake_generate_fact_check(client, model, system_prompt, user_prompt):
+        return [], _FIXTURE_USAGE
+
+    monkeypatch.setattr(perform_module, "_generate_performance", fake_generate_performance)
+    monkeypatch.setattr(perform_module, "_generate_fact_check", fake_generate_fact_check)
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    perform_module.perform_stage(episode, critique_output, articles, client=object())
+
+    assert "Mood this episode: playful — today's stories lean silly" in system_prompts[0]
 
 
 def test_validate_performed_source_ids_rejects_unknown_id():

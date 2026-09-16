@@ -13,12 +13,14 @@ and review (podcast.stages.critique).
 from __future__ import annotations
 
 import logging
+import random
 from datetime import datetime, timezone
 from typing import Literal
 
 from openai import OpenAI
 from pydantic import BaseModel, create_model
 
+from podcast import paths
 from podcast.env import require_env
 from podcast.llm_retry import generate_with_retry
 from podcast.models import (
@@ -26,7 +28,9 @@ from podcast.models import (
     Article,
     Episode,
     Host,
+    HostMood,
     HostStance,
+    MOOD_OPTIONS,
     Outline,
     OutlineOutput,
     OutlineStory,
@@ -53,6 +57,55 @@ ARTICLE_BRIEF_CHARS = 300
 COLD_OPEN_OUTRO_RESERVE_WORDS = 120
 
 
+def _previous_episode_moods(current_episode_id: str) -> dict[str, str]:
+    """host name -> mood, from the most recently created episode BEFORE
+    this one that has a persisted outline.json with moods on it — used so
+    _sample_moods doesn't repeat a host's mood back-to-back. Scans
+    paths.EPISODES_DIR directly (the same "read a sibling artefact off
+    disk" convention podcast.stages.quality uses) since outline_stage has
+    no DB access of its own. Episode directories are named with a sortable
+    timestamp prefix (see artefacts.new_episode_id), so a plain name sort
+    gives chronological order. Returns {} — "nothing to exclude" — for the
+    first episode ever, when no earlier episode reached outline, or when
+    the nearest earlier outline.json predates this field (host_moods
+    defaults to [] for those, same backward-compatibility reasoning as
+    elsewhere in this codebase)."""
+    base = paths.EPISODES_DIR
+    if not base.is_dir():
+        return {}
+
+    earlier = sorted(d.name for d in base.iterdir() if d.is_dir() and d.name < current_episode_id)
+    for episode_id in reversed(earlier):
+        outline_path = base / episode_id / "outline.json"
+        if not outline_path.is_file():
+            continue
+        try:
+            previous = OutlineOutput.model_validate_json(outline_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            # A corrupt or concurrently-being-written neighbor shouldn't
+            # break *this* episode's generation — just skip it and keep
+            # looking further back.
+            continue
+        if previous.outline.host_moods:
+            return {m.host: m.mood for m in previous.outline.host_moods}
+    return {}
+
+
+def _sample_moods(rng: random.Random, host_names: list[str], previous_moods: dict[str, str]) -> dict[str, str]:
+    """One mood per host, drawn from MOOD_OPTIONS, excluding that host's
+    mood in the immediately preceding episode (if any) so the same host
+    doesn't feel identical two episodes running. Falls back to the full
+    option set when there's no previous mood to exclude for that host
+    (first episode ever, a newly added host, or an old episode). See
+    docs/decisions.md ("Persona rigidity")."""
+    sampled: dict[str, str] = {}
+    for name in host_names:
+        previous = previous_moods.get(name)
+        choices = [m for m in MOOD_OPTIONS if m != previous] or list(MOOD_OPTIONS)
+        sampled[name] = rng.choice(choices)
+    return sampled
+
+
 def _render_article_brief(article: Article) -> str:
     snippet = article.summary or (article.text or "")[:ARTICLE_BRIEF_CHARS] or "(no summary)"
     marker = "[EVERGREEN PRIMER] " if article.source == "evergreen" else ""
@@ -76,10 +129,11 @@ def _render_host_brief(host: Host) -> str:
     return f"- {host.name} (home turf: {turf}): {first_line}"
 
 
-def _build_prompts(profile: Profile, articles: list[Article]) -> tuple[str, str]:
+def _build_prompts(profile: Profile, articles: list[Article], sampled_moods: dict[str, str]) -> tuple[str, str]:
     podcast = profile.podcast
     known_ids = ", ".join(a.source_id for a in articles)
     host_lines = "\n".join(_render_host_brief(host) for host in podcast.hosts)
+    mood_lines = "\n".join(f"- {name}: {mood}" for name, mood in sampled_moods.items())
     bits_block = (
         "\n".join(
             f"- {bit.effective_id}: {bit.description} (use at most {bit.max_per_episode} time(s) this episode)"
@@ -95,7 +149,17 @@ def _build_prompts(profile: Profile, articles: list[Article]) -> tuple[str, str]
         "You are the showrunner for a two-host podcast, planning the episode before any "
         "dialogue is written.\n\n"
         f"Hosts:\n{host_lines}\n\n"
+        "Each host's persona describes their tendencies and voice — background, general "
+        "speech patterns, what they gravitate to — not a script of fixed lines to reuse. "
+        "Nothing below should read as quoting the persona verbatim.\n\n"
         f"Listener: {podcast.listener.name}.\n\n"
+        f"Each host already has a fixed mood for this episode, yours to explain, not to "
+        f"choose:\n{mood_lines}\n"
+        "For each host, write a one-line reason this mood fits *today*, genuinely tied to "
+        "one or more of today's actual stories below — not a generic line that could apply "
+        "to any episode. The mood may colour a story's stance/angle where it naturally "
+        "would, but never invent facts or contradict the host's underlying persona to "
+        "justify it.\n\n"
         f"Recurring bits available (referenced by id):\n{bits_block}\n\n"
         f"{evergreen_line}"
         "For the articles given, decide: an episode title, the order to cover the "
@@ -109,8 +173,8 @@ def _build_prompts(profile: Profile, articles: list[Article]) -> tuple[str, str]
         "For each story, also give each host a stance: an attitude toward that specific "
         "story (e.g. excited, skeptical, moved, amused, bored, annoyed, protective — or "
         "another word that actually fits), one sentence on why, consistent with that "
-        "host's persona and home turf above, and an arc — how the stance shifts by the "
-        "end of the segment, if it does at all (null if it stays constant throughout). "
+        "host's persona, home turf, and mood above, and an arc — how the stance shifts by "
+        "the end of the segment, if it does at all (null if it stays constant throughout). "
         f"Every story needs exactly one stance per host: {host_names}.\n"
         "For every story after the first, decide how it bridges from the story immediately "
         "before it: transition.kind is either \"link\" — only when there's a genuine "
@@ -173,10 +237,16 @@ def _response_model(bit_ids: list[str], host_names: list[str]) -> type[BaseModel
         stances=(stances_model, ...),
         transition=(Transition | None, None),
     )
+    # mood_reasons: same "object with one required field per host name"
+    # structural trick as stances_model above — the mood itself is already
+    # decided (sampled in code, given to the model as a fact in the
+    # prompt), only the per-host reason is the model's to write.
+    mood_reasons_model = create_model("MoodReasonsResponse", **{name: (str, ...) for name in host_names})
     return create_model(
         "OutlineResponse",
         title=(str, ...),
         stories=(list[story_model], ...),
+        mood_reasons=(mood_reasons_model, ...),
     )
 
 
@@ -194,11 +264,20 @@ def _convert_story(story_response: BaseModel, host_names: list[str]) -> OutlineS
 
 
 def _generate_outline(
-    client: OpenAI, model: str, system_prompt: str, user_prompt: str, bit_ids: list[str], host_names: list[str]
+    client: OpenAI,
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    bit_ids: list[str],
+    host_names: list[str],
+    sampled_moods: dict[str, str],
 ) -> tuple[Outline, TokenUsage]:
     """Boundary around the OpenAI call — the seam tests monkeypatch. Builds
     the bit_ids/host_names-constrained schema (see _response_model), then
-    converts the result back to the canonical Outline via _convert_story."""
+    converts the result back to the canonical Outline via _convert_story.
+    `sampled_moods` (already decided before this call — see
+    outline_stage/_sample_moods) is combined with the model's own
+    per-host `mood_reasons` to build `Outline.host_moods`."""
     response_model = _response_model(bit_ids, host_names)
     completion = client.chat.completions.parse(
         model=model,
@@ -210,10 +289,14 @@ def _generate_outline(
     )
     parsed = completion.choices[0].message.parsed
     stories = [_convert_story(story, host_names) for story in parsed.stories]
+    host_moods = [
+        HostMood(host=name, mood=sampled_moods[name], reason=getattr(parsed.mood_reasons, name))
+        for name in host_names
+    ]
     usage = TokenUsage(
         model=model, prompt_tokens=completion.usage.prompt_tokens, completion_tokens=completion.usage.completion_tokens
     )
-    return Outline(title=parsed.title, stories=stories), usage
+    return Outline(title=parsed.title, stories=stories, host_moods=host_moods), usage
 
 
 def _validate_outline(
@@ -271,6 +354,10 @@ def _validate_outline(
         if count > limit:
             raise ValueError(f"recurring bit {bit_id!r} used {count} times, exceeds max_per_episode={limit}")
 
+    mood_hosts = [m.host for m in outline.host_moods]
+    if set(mood_hosts) != known_host_names or len(mood_hosts) != len(known_host_names):
+        raise ValueError(f"outline must have exactly one mood per host {sorted(known_host_names)}, got {mood_hosts}")
+
 
 def _story_score(story: OutlineStory, score_by_id: dict[str, float]) -> float:
     scores = [score_by_id.get(sid, 0.0) for sid in story.source_ids]
@@ -323,7 +410,17 @@ def outline_stage(episode: Episode, rank_output: RankOutput, client: OpenAI | No
     bit_ids = [bit.effective_id for bit in profile.podcast.recurring_bits]
     host_names = [host.name for host in profile.podcast.hosts]
 
-    system_prompt, user_prompt = _build_prompts(profile, articles)
+    # Seeded from the episode_id (not the wall clock or an unseeded global
+    # RNG) so re-running outline_stage for the same episode reproduces the
+    # same moods — matters for --until/--from-* reruns during development,
+    # and for debugging a specific episode's outline. Excludes each host's
+    # mood from the nearest earlier episode so two episodes running don't
+    # feel identical. See docs/decisions.md ("Persona rigidity").
+    rng = random.Random(episode.episode_id)
+    previous_moods = _previous_episode_moods(episode.episode_id)
+    sampled_moods = _sample_moods(rng, host_names, previous_moods)
+
+    system_prompt, user_prompt = _build_prompts(profile, articles, sampled_moods)
 
     # A local accumulator, not a tuple threaded through generate_with_retry:
     # a first attempt that fails *validation* still made a real, billed API
@@ -332,7 +429,9 @@ def outline_stage(episode: Episode, rank_output: RankOutput, client: OpenAI | No
     usage: list[TokenUsage] = []
 
     def generate(prompt: str) -> Outline:
-        outline, call_usage = _generate_outline(client, profile.llm.model, system_prompt, prompt, bit_ids, host_names)
+        outline, call_usage = _generate_outline(
+            client, profile.llm.model, system_prompt, prompt, bit_ids, host_names, sampled_moods
+        )
         usage.append(call_usage)
         return outline
 
@@ -347,6 +446,9 @@ def outline_stage(episode: Episode, rank_output: RankOutput, client: OpenAI | No
                 "outline: story %d %r transition=%s hint=%r",
                 i, story.headline, story.transition.kind, story.transition.text_hint,
             )
+
+    for mood in outline.host_moods:
+        logger.info("outline: %s mood=%s reason=%r", mood.host, mood.mood, mood.reason)
 
     # word_budget is code-computed, not asked of the model — proportional to
     # each story's rank score, summing to duration_minutes*words_per_minute

@@ -17,6 +17,7 @@ from podcast.models import (
     Episode,
     FactChangeFlag,
     Host,
+    HostMood,
     HostStance,
     Interest,
     JudgeScore,
@@ -143,6 +144,13 @@ def test_catchphrase_count_is_zero_with_no_repetition():
 # ---- grounding ------------------------------------------------------------
 
 
+def _host_moods() -> list[HostMood]:
+    return [
+        HostMood(host="Nova", mood="playful", reason="today's stories lean silly"),
+        HostMood(host="Max", mood="tired-but-sharp", reason="up late double-checking a stat"),
+    ]
+
+
 def _outline_output_for_grounding(retried: bool = False) -> OutlineOutput:
     return OutlineOutput(
         episode_id="ep1",
@@ -150,6 +158,7 @@ def _outline_output_for_grounding(retried: bool = False) -> OutlineOutput:
         model="gpt-4o-mini",
         outline=Outline(
             title="t",
+            host_moods=_host_moods(),
             stories=[
                 OutlineStory(
                     headline="Story A",
@@ -328,6 +337,9 @@ def test_quality_stage_persists_quality_json(tmp_path, monkeypatch):
     assert output.grounding.source_count == 3
     assert output.grounding.critique_flags == 1
     assert output.usage == [_FIXTURE_USAGE]
+    # copied straight from outline.json's own host_moods, not recomputed —
+    # see docs/decisions.md ("Persona rigidity")
+    assert reparsed.host_moods == _host_moods()
 
 
 def test_quality_stage_calls_judge_with_the_cheap_model_exactly_once(tmp_path, monkeypatch):

@@ -23,6 +23,8 @@ from podcast.llm_retry import generate_with_retry
 from podcast.models import (
     Article,
     Episode,
+    Host,
+    HostMood,
     HostStance,
     Line,
     Listener,
@@ -110,6 +112,19 @@ def _style_instructions(style: Style) -> str:
         else "Keep exchanges focused — minimal banter between hosts."
     )
     return "\n".join([humour, depth, tangents, banter])
+
+
+def _render_host_persona(host: Host, mood_by_host: dict[str, HostMood]) -> str:
+    """Persona plus this episode's sampled mood (outline.host_moods,
+    code-sampled and seeded — see podcast.stages.outline) — write from
+    both, not the persona alone, so the same host doesn't sound identical
+    across episodes. `mood_by_host` is missing an entry only for an
+    outline.json persisted before host_moods existed (backward
+    compatibility default []), in which case the line is simply omitted.
+    See docs/decisions.md ("Persona rigidity")."""
+    mood = mood_by_host.get(host.name)
+    mood_line = f"\nMood this episode: {mood.mood} — {mood.reason}" if mood else ""
+    return f"{host.name} (home turf: {', '.join(host.home_turf) or 'general'}):\n{host.persona}{mood_line}"
 
 
 def _render_stance(stance: HostStance) -> str:
@@ -209,9 +224,9 @@ def _build_prompts(profile: Profile, outline: Outline, articles: list[Article]) 
     recurring_bits_by_id = {bit.effective_id: bit for bit in podcast.recurring_bits}
     tags_supported = supports_audio_tags(profile.tts.model_id) or supports_audio_tags(profile.tts.dialogue_model_id)
 
+    mood_by_host = {m.host: m for m in outline.host_moods}
     persona_block = (
-        f"{host_a.name} (home turf: {', '.join(host_a.home_turf) or 'general'}):\n{host_a.persona}\n\n"
-        f"{host_b.name} (home turf: {', '.join(host_b.home_turf) or 'general'}):\n{host_b.persona}"
+        f"{_render_host_persona(host_a, mood_by_host)}\n\n" f"{_render_host_persona(host_b, mood_by_host)}"
     )
 
     delivery_line = (
@@ -226,10 +241,17 @@ def _build_prompts(profile: Profile, outline: Outline, articles: list[Article]) 
     system_prompt = (
         "You are writing a two-host podcast script for text-to-speech.\n\n"
         f"Hosts:\n{persona_block}\n\n"
+        "Each host's persona describes their tendencies and voice — background, general "
+        "speech patterns, what they gravitate to — not a script of fixed lines to reuse. "
+        "Nothing below should read as quoting the persona verbatim.\n\n"
         f"{_render_listener(podcast.listener)}\n\n"
         f"Style:\n{_style_instructions(podcast.style)}\n\n"
         f"Tone: {podcast.tone}.\n\n"
         "Hard rules:\n"
+        "- Write each host consistent with their persona's tendencies, their current stance "
+        "for a story, and their mood for this episode (given above) all at once — the mood "
+        "should colour energy and delivery throughout, not just get mentioned once, but "
+        "never override a story's stance or invent something the persona wouldn't do.\n"
         f"- The cold open must identify the show and both hosts in one breath — a single "
         f"short line naming \"{podcast.name}\" and introducing {host_a.name} and "
         f"{host_b.name}, not a longer preamble.\n"

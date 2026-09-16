@@ -1,7 +1,20 @@
+import { useState } from 'react'
 import Button from './Button.jsx'
 import Field, { Select, TextArea, TextInput } from './Field.jsx'
 
-function HostRow({ host, voices, onChange, onRemove }) {
+function HostRow({ host, voices, presets, onChange, onRemove }) {
+  // Remounted (via `key`) after every apply so the select snaps back to the
+  // placeholder — a preset fills the row once, it isn't a binding the row
+  // stays "on" afterward, and the row stays fully editable from there.
+  const [presetPickerKey, setPresetPickerKey] = useState(0)
+
+  function applyPreset(presetName) {
+    const preset = presets.find((p) => p.name === presetName)
+    if (!preset) return
+    onChange({ ...host, name: preset.name, voice_id: preset.voice_id, persona: preset.persona, home_turf: preset.home_turf })
+    setPresetPickerKey((k) => k + 1)
+  }
+
   return (
     <div className="space-y-3 rounded-md border border-ink/15 p-3">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
@@ -20,6 +33,20 @@ function HostRow({ host, voices, onChange, onRemove }) {
             ))}
           </Select>
         </Field>
+        {presets.length > 0 && (
+          <Field label="Preset" className="flex-1">
+            <Select key={presetPickerKey} defaultValue="" onChange={(e) => applyPreset(e.target.value)}>
+              <option value="" disabled>
+                Choose a preset…
+              </option>
+              {presets.map((p) => (
+                <option key={p.name} value={p.name}>
+                  {p.name}
+                </option>
+              ))}
+            </Select>
+          </Field>
+        )}
         <Button variant="danger" type="button" onClick={onRemove} className="self-end sm:mt-6 sm:self-auto">
           Remove
         </Button>
@@ -29,7 +56,7 @@ function HostRow({ host, voices, onChange, onRemove }) {
         <TextArea
           value={host.persona}
           onChange={(e) => onChange({ ...host, persona: e.target.value })}
-          placeholder="Brief this host like a voice actor: background, speech pattern, catchphrase…"
+          placeholder="Brief this host like a voice actor: background, speech pattern, tendencies…"
           className="min-h-32"
         />
       </Field>
@@ -37,7 +64,7 @@ function HostRow({ host, voices, onChange, onRemove }) {
   )
 }
 
-export default function HostEditor({ hosts, voices, onChange }) {
+export default function HostEditor({ hosts, voices, presets = [], onChange }) {
   function updateAt(index, next) {
     onChange(hosts.map((h, i) => (i === index ? next : h)))
   }
@@ -57,7 +84,7 @@ export default function HostEditor({ hosts, voices, onChange }) {
       )}
       {hosts.map((host, i) => (
         // eslint-disable-next-line react/no-array-index-key -- rows have no stable id until saved
-        <HostRow key={i} host={host} voices={voices} onChange={(next) => updateAt(i, next)} onRemove={() => removeAt(i)} />
+        <HostRow key={i} host={host} voices={voices} presets={presets} onChange={(next) => updateAt(i, next)} onRemove={() => removeAt(i)} />
       ))}
       <Button type="button" variant="secondary" onClick={add}>
         + Add host

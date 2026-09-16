@@ -33,6 +33,7 @@ function blankProfile() {
 export default function Settings() {
   const [profile, setProfile] = useState(null)
   const [voices, setVoices] = useState([])
+  const [hostPresets, setHostPresets] = useState([])
   const [loadError, setLoadError] = useState(null)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState(null)
@@ -43,6 +44,11 @@ export default function Settings() {
       .getVoices()
       .then(setVoices)
       .catch(() => setVoices([]))
+
+    api
+      .getHostPresets()
+      .then(setHostPresets)
+      .catch(() => setHostPresets([]))
 
     api
       .getProfile()
@@ -144,6 +150,7 @@ export default function Settings() {
         <HostEditor
           hosts={profile.podcast.hosts}
           voices={voices}
+          presets={hostPresets}
           onChange={(hosts) => updatePodcast({ hosts })}
         />
       </Card>

@@ -15,6 +15,7 @@ from podcast.models import (
     Article,
     Episode,
     Host,
+    HostMood,
     HostStance,
     Interest,
     Line,
@@ -73,9 +74,17 @@ def _episode(profile: Profile, episode_id: str = "ep1") -> Episode:
     return Episode(episode_id=episode_id, created_at=datetime.now(timezone.utc), profile=profile)
 
 
+def _host_moods() -> list[HostMood]:
+    return [
+        HostMood(host="Nova", mood="playful", reason="today's stories lean silly"),
+        HostMood(host="Max", mood="tired-but-sharp", reason="up late double-checking a stat"),
+    ]
+
+
 def _outline_output(episode_id: str, source_id: str) -> OutlineOutput:
     outline = Outline(
         title="Test Episode",
+        host_moods=_host_moods(),
         stories=[
             OutlineStory(
                 headline="Something happened",
@@ -339,6 +348,32 @@ def test_build_prompts_states_cold_open_identification_rule(tmp_path):
     assert "one breath" in system_prompt
     assert profile.podcast.hosts[0].name in system_prompt
     assert profile.podcast.hosts[1].name in system_prompt
+
+
+def test_build_prompts_includes_moods_and_tendency_framing():
+    profile = _profile()
+    outline_output = _outline_output("ep1", "abcd1234")
+    articles = [_article("abcd1234")]
+
+    system_prompt, _user_prompt = script_module._build_prompts(profile, outline_output.outline, articles)
+
+    assert "Mood this episode: playful — today's stories lean silly" in system_prompt
+    assert "Mood this episode: tired-but-sharp — up late double-checking a stat" in system_prompt
+    assert "not a script of fixed lines to reuse" in system_prompt
+
+
+def test_build_prompts_omits_mood_line_when_outline_has_no_host_moods():
+    """An outline.json persisted before host_moods existed (defaults to
+    []) must not crash script prompt-building — the mood line is simply
+    absent for that host."""
+    profile = _profile()
+    outline_output = _outline_output("ep1", "abcd1234")
+    outline_output.outline.host_moods = []
+    articles = [_article("abcd1234")]
+
+    system_prompt, _user_prompt = script_module._build_prompts(profile, outline_output.outline, articles)
+
+    assert "Mood this episode" not in system_prompt
 
 
 def test_build_prompts_laughter_instruction_depends_on_tag_support():

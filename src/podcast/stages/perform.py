@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 
 from openai import OpenAI
 
+from podcast.artefacts import load_outline_output
 from podcast.env import require_env
 from podcast.llm_retry import generate_with_retry
 from podcast.models import (
@@ -32,6 +33,8 @@ from podcast.models import (
     Episode,
     FactChangeFlag,
     FactCheck,
+    Host,
+    HostMood,
     Performance,
     PerformedLine,
     PerformOutput,
@@ -67,9 +70,23 @@ def _render_script_for_performance(script: Script) -> str:
     return "\n".join(f"[{i}] {line.speaker}: {line.text}" for i, line in enumerate(flatten_lines(script)))
 
 
-def _build_performance_prompts(profile: Profile, script: Script) -> tuple[str, str]:
+def _render_host_persona(host: Host, mood_by_host: dict[str, HostMood]) -> str:
+    """Persona plus this episode's sampled mood (outline.host_moods, loaded
+    from outline.json — see perform_stage) — the performance director draws
+    on both to shape delivery/pacing/energy, the same "persona plus mood"
+    reasoning as script.py's own _render_host_persona. Missing an entry
+    only for an outline.json persisted before host_moods existed. See
+    docs/decisions.md ("Persona rigidity")."""
+    mood = mood_by_host.get(host.name)
+    mood_line = f"\nMood this episode: {mood.mood} — {mood.reason}" if mood else ""
+    return f"{host.name}:\n{host.persona}{mood_line}"
+
+
+def _build_performance_prompts(profile: Profile, script: Script, host_moods: list[HostMood]) -> tuple[str, str]:
     hosts = profile.podcast.hosts
     host_names = ", ".join(h.name for h in hosts)
+    mood_by_host = {m.host: m for m in host_moods}
+    persona_block = "\n\n".join(_render_host_persona(host, mood_by_host) for host in hosts)
     cold_open_speakers = [line.speaker for line in script.cold_open]
     original_words = sum(len(line.text.split()) for line in flatten_lines(script))
     max_words = int(original_words * (1 + MAX_WORD_OVERRUN))
@@ -78,7 +95,11 @@ def _build_performance_prompts(profile: Profile, script: Script) -> tuple[str, s
         "You are a vocal performance director for a two-host podcast. You are handed a "
         "finished, fact-checked script and your only job is to rewrite it for how it should "
         "sound SPOKEN — never change what it says.\n\n"
-        f"Hosts: {host_names}.\n\n"
+        f"Hosts:\n{persona_block}\n\n"
+        "Each host's persona describes their tendencies and voice — background, general "
+        "speech patterns, what they gravitate to — not a script of fixed lines to reuse. "
+        "Draw on the persona and on the mood given above to shape delivery, pacing, and "
+        "energy for that host throughout — never to change what a line says or means.\n\n"
         "Hard rules:\n"
         "1. Punctuation for flow: use commas, ellipses and dashes for a continuing thought; "
         "a full stop only where the speaker genuinely stops. A host should never read like a "
@@ -299,7 +320,15 @@ def perform_stage(
     known_speakers = {host.name for host in profile.podcast.hosts}
     known_ids = {a.source_id for a in articles}
 
-    system_prompt, user_prompt = _build_performance_prompts(profile, original_script)
+    # outline.json is guaranteed to exist by the time perform runs (perform
+    # requires critique, critique requires outline) — read directly rather
+    # than threading a new parameter through every service.py call site.
+    # Same "read a sibling artefact off disk" convention as quality_stage.
+    # See docs/decisions.md ("Persona rigidity").
+    outline_output = load_outline_output(episode_dir(episode.episode_id))
+    host_moods = outline_output.outline.host_moods
+
+    system_prompt, user_prompt = _build_performance_prompts(profile, original_script, host_moods)
 
     # See outline.py's outline_stage for why this is a local accumulator
     # rather than a tuple threaded through generate_with_retry: a rejected

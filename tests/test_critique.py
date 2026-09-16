@@ -4,6 +4,7 @@ monkeypatched at the critique module's _generate_critique seam.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -38,6 +39,11 @@ _FIXTURE_USAGE = TokenUsage(model="m", prompt_tokens=10, completion_tokens=5)
 
 def _host(name: str) -> Host:
     return Host(name=name, voice_id=f"voice-{name.lower()}", persona=f"{name} is curious and precise.", home_turf=[])
+
+
+def _host_with_catchphrase(name: str, phrase: str) -> Host:
+    persona = f'{name} is curious and precise.\nCatchphrase: "{phrase}"\n'
+    return Host(name=name, voice_id=f"voice-{name.lower()}", persona=persona, home_turf=[])
 
 
 def _profile() -> Profile:
@@ -520,3 +526,183 @@ def test_critique_stage_reports_terse_hosts(tmp_path, monkeypatch):
     terse_by_host = {f.host: f for f in output.terse_hosts}
     assert "Max" in terse_by_host
     assert "Nova" not in terse_by_host
+
+
+# ---- catchphrase enforcement (Persona rigidity, Part 1) --------------------
+
+
+def test_declared_catchphrases_parses_the_catchphrase_line():
+    phrase = "Okay, but just imagine this for a second..."
+    hosts = [_host_with_catchphrase("Nova", phrase), _host("Max")]
+    assert critique_module._declared_catchphrases(hosts) == {"Nova": phrase}
+
+
+def test_declared_catchphrases_is_empty_when_no_host_declares_one():
+    hosts = [_host("Nova"), _host("Max")]
+    assert critique_module._declared_catchphrases(hosts) == {}
+
+
+def test_catchphrase_violations_flags_cold_open_use():
+    phrase = "Let's just bottom-line this."
+    script = Script(
+        title="t",
+        cold_open=[Line(speaker="Max", text=f"{phrase} Right?")],
+        segments=[Segment(headline="h", source_ids=[], lines=[Line(speaker="Nova", text="fine")])],
+        outro=[],
+    )
+    violations = critique_module._catchphrase_violations(script, {"Max": phrase})
+    assert len(violations) == 1
+    assert "cold open" in violations[0]
+
+
+def test_catchphrase_violations_flags_repeated_use_outside_cold_open():
+    phrase = "Let's just bottom-line this."
+    script = Script(
+        title="t",
+        cold_open=[],
+        segments=[
+            Segment(
+                headline="h",
+                source_ids=[],
+                lines=[Line(speaker="Max", text=phrase), Line(speaker="Max", text=f"{phrase} again")],
+            )
+        ],
+        outro=[],
+    )
+    violations = critique_module._catchphrase_violations(script, {"Max": phrase})
+    assert len(violations) == 1
+    assert "2 times" in violations[0]
+
+
+def test_catchphrase_violations_allows_a_single_non_cold_open_use():
+    phrase = "Let's just bottom-line this."
+    script = Script(
+        title="t",
+        cold_open=[],
+        segments=[Segment(headline="h", source_ids=[], lines=[Line(speaker="Max", text=phrase)])],
+        outro=[],
+    )
+    assert critique_module._catchphrase_violations(script, {"Max": phrase}) == []
+
+
+def test_build_prompts_includes_declared_catchphrase_rule_and_current_violations():
+    phrase = "Okay, but just imagine this for a second..."
+    profile = _profile()
+    profile.podcast.hosts = [_host_with_catchphrase("Nova", phrase), _host("Max")]
+    script = Script(
+        title="t",
+        cold_open=[Line(speaker="Nova", text=f"{phrase} we start the show.")],
+        segments=[Segment(headline="h", source_ids=[], lines=[Line(speaker="Max", text="fine")])],
+        outro=[],
+    )
+    outline = _outline_output("ep1", "abcd1234").outline
+
+    system_prompt, _user_prompt = critique_module._build_prompts(profile, script, outline)
+
+    assert "repeated_catchphrase" in system_prompt
+    assert phrase in system_prompt
+    assert "cold open" in system_prompt
+
+
+def test_build_prompts_omits_catchphrase_lines_when_no_host_declares_one():
+    profile = _profile()  # default test hosts have no Catchphrase: line
+    script = _script("abcd1234")
+    outline = _outline_output("ep1", "abcd1234").outline
+
+    system_prompt, _user_prompt = critique_module._build_prompts(profile, script, outline)
+
+    assert "repeated_catchphrase" in system_prompt  # the rule label is always listed
+    assert "Declared catchphrases" not in system_prompt  # but no host has one to declare
+
+
+def test_critique_stage_retries_when_catchphrase_rule_still_violated(tmp_path, monkeypatch):
+    """Hard backstop, not just a prompt instruction — see
+    docs/decisions.md ("Persona rigidity"): a critique response that leaves
+    a catchphrase used twice must trigger generate_with_retry's one retry,
+    exactly like a bad grounding response does."""
+    phrase = "Okay, but just imagine this for a second..."
+    profile = _profile()
+    profile.podcast.hosts = [_host_with_catchphrase("Nova", phrase), _host("Max")]
+    episode = _episode(profile)
+    articles = [_article("abcd1234")]
+    script_output = _script_output(episode.episode_id, "abcd1234")
+    # cold_open(0)="Welcome back...", segment lines(1,2), outro(3) — put the
+    # catchphrase in the segment AND the outro (two uses, neither in the
+    # cold open, so only the "at most once" rule trips, not "never in cold open")
+    script_output.script.segments[0].lines[0] = Line(speaker="Nova", text=f"{phrase} here's the story.")
+    script_output.script.outro = [Line(speaker="Nova", text=f"{phrase} see you next time.")]
+    outline_output = _outline_output(episode.episode_id, "abcd1234")
+
+    prompts: list[str] = []
+
+    def fake_generate_critique(client, model, system_prompt, user_prompt):
+        prompts.append(user_prompt)
+        if len(prompts) == 1:
+            return Critique(flags=[]), _FIXTURE_USAGE  # leaves both uses in place
+        return (
+            Critique(
+                flags=[
+                    CritiqueFlag(line_index=3, issue="repeated_catchphrase", rewritten_lines=[Line(speaker="Nova", text="See you next time.")])
+                ]
+            ),
+            _FIXTURE_USAGE,
+        )
+
+    monkeypatch.setattr(critique_module, "_generate_critique", fake_generate_critique)
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    output = critique_module.critique_stage(episode, script_output, articles, outline_output, client=object())
+
+    assert len(prompts) == 2
+    assert "catchphrase rule violated" in prompts[1]  # the validation error, fed back verbatim
+    assert output.retried is True
+    assert output.revised_script.outro[0].text == "See you next time."
+
+
+def test_critique_stage_raises_when_catchphrase_rule_violated_twice(tmp_path, monkeypatch):
+    phrase = "Okay, but just imagine this for a second..."
+    profile = _profile()
+    profile.podcast.hosts = [_host_with_catchphrase("Nova", phrase), _host("Max")]
+    episode = _episode(profile)
+    articles = [_article("abcd1234")]
+    script_output = _script_output(episode.episode_id, "abcd1234")
+    script_output.script.cold_open = [Line(speaker="Nova", text=f"{phrase} welcome!")]  # violates "never in cold open"
+    outline_output = _outline_output(episode.episode_id, "abcd1234")
+
+    prompts: list[str] = []
+
+    def fake_generate_critique(client, model, system_prompt, user_prompt):
+        prompts.append(user_prompt)
+        return Critique(flags=[]), _FIXTURE_USAGE  # never fixes the cold-open use
+
+    monkeypatch.setattr(critique_module, "_generate_critique", fake_generate_critique)
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    with pytest.raises(ValueError, match="catchphrase rule violated"):
+        critique_module.critique_stage(episode, script_output, articles, outline_output, client=object())
+
+    assert len(prompts) == 2  # exactly one retry, no more
+
+
+def test_critique_stage_logs_catchphrase_usage_count(tmp_path, monkeypatch, caplog):
+    phrase = "Okay, but just imagine this for a second..."
+    profile = _profile()
+    profile.podcast.hosts = [_host_with_catchphrase("Nova", phrase), _host("Max")]
+    episode = _episode(profile)
+    articles = [_article("abcd1234")]
+    script_output = _script_output(episode.episode_id, "abcd1234")
+    script_output.script.segments[0].lines[0] = Line(speaker="Nova", text=f"{phrase} here's the story.")
+    outline_output = _outline_output(episode.episode_id, "abcd1234")
+
+    monkeypatch.setattr(
+        critique_module,
+        "_generate_critique",
+        lambda client, model, system_prompt, user_prompt: (Critique(flags=[]), _FIXTURE_USAGE),
+    )
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    with caplog.at_level(logging.INFO, logger="podcast.stages.critique"):
+        critique_module.critique_stage(episode, script_output, articles, outline_output, client=object())
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("Nova" in m and "catchphrase" in m and "1 time" in m for m in messages)

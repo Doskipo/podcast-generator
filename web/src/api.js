@@ -47,6 +47,7 @@ export const api = {
   getProfile: () => getJson(`${API}/profile`),
   putProfile: (profile) => putJson(`${API}/profile`, profile),
   getVoices: () => getJson(`${API}/voices`),
+  getHostPresets: () => getJson(`${API}/hosts/presets`),
   suggestInterest: (topic, description) => postJson(`${API}/interests/suggest`, { topic, description }),
 
   listEpisodes: () => getJson(`${API}/episodes`),

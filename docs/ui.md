@@ -20,7 +20,7 @@ router prefix and stays at the root.
 
 | Path         | Page                | What it does |
 |--------------|---------------------|--------------|
-| `/settings`  | `src/pages/Settings.jsx` | Edit the profile: podcast name, listener name, duration, tone; interests (topic, Low/Medium/High weight choice, description + "Suggest" button); hosts (name, persona, voice picker); style sliders/toggles (humour, depth, tangents, banter); schedule (cron field + presets). Each section `Card` carries an icon (`lucide-react`). Save → `PUT /api/profile`. |
+| `/settings`  | `src/pages/Settings.jsx` | Edit the profile: podcast name, listener name, duration, tone; interests (topic, Low/Medium/High weight choice, description + "Suggest" button); hosts (name, voice picker, a "Choose a preset" picker — see below — persona); style sliders/toggles (humour, depth, tangents, banter); schedule (cron field + presets). Each section `Card` carries an icon (`lucide-react`). Save → `PUT /api/profile`. |
 | `/episodes`  | `src/pages/Episodes.jsx` | Episodes as cards (title from the script — falls back to the date when there isn't one yet — duration, status, a labelled "Details" toggle), newest first. Mocked rows never appear (the backend excludes them — see "Episode list" below). Default view is `done`/`running`/`pending` only; `failed`/`no_content` sit behind a "Show failed / no content (N)" toggle, each set independently collapsing anything older than two weeks under its own "Older (N)" disclosure (`EpisodeList.jsx`). "Generate now" lives in the app shell, not this page — see "Generate now" below — and dispatches a `podcast:episode-created` window event this page listens for to refresh/restart its poll. A card's "Details" expands (lazy-loads `GET /api/episodes/{id}`) into the player (the card's hero — large play control, live time/progress bar, streaming `/api/episodes/{id}/audio`, see "Audio player" below) plus three collapsed-by-default disclosures, Transcript / Sources / About the hosts; a failed episode's card shows its human-readable `failure_reason` when one was recorded. |
 | `/dashboard` | `src/pages/Dashboard.jsx` | Loads `GET /api/metrics/summary` (once per `includeMocked` toggle — see docs/decisions.md, "dashboard mocked-data toggle") and renders a KPI row (episodes done/total, completion rate, D7 retention, cost/episode), three recharts charts (episodes & plays per day, cost by stage, topic distribution), a recent-failures/no_content table, and a **Quality over time** card (`QualityChart` + `QualityTable` — see docs/decisions.md, "Quality metrics"; never mocked, since a mocked row can't have a `quality.json`). Shows a "mocked demo data" banner only in the opted-in mode. |
 
@@ -44,6 +44,14 @@ router prefix and stays at the root.
   splices the response's `description` + `queries` back into that one row's
   local state — it does not touch the rest of the form or save anything
   itself (still requires clicking the page's own Save).
+- **Hosts → Choose a preset**: `GET /api/hosts/presets` (`host_presets.py`,
+  see docs/decisions.md, "Persona rigidity") is loaded once on mount
+  alongside voices. Each host row in `HostEditor.jsx` gets its own preset
+  `<select>`; picking one overwrites that row's name/voice_id/persona/
+  home_turf in local state, then the select remounts itself (a `key` bump)
+  back to its placeholder — it's a one-shot fill, not a binding, and every
+  field stays editable afterward. Like the rest of the form, applying a
+  preset doesn't save anything by itself.
 - **Episodes list**: `Episodes.jsx` owns one `episodes` array in state,
   refreshed by `GET /api/episodes`. A `setTimeout`-based loop (`refresh()`
   in `Episodes.jsx`) re-fetches every 3s **only while at least one episode

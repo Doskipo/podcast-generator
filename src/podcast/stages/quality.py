@@ -258,6 +258,7 @@ def quality_stage(episode: Episode, perform_output: PerformOutput, client: OpenA
         grounding=grounding,
         naturalness=naturalness,
         judge=judge,
+        host_moods=outline_output.outline.host_moods,
         usage=[usage],
     )
 

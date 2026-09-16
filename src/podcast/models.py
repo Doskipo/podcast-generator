@@ -391,6 +391,27 @@ class Transition(BaseModel):
     text_hint: str = Field(min_length=1)
 
 
+MOOD_OPTIONS: tuple[str, ...] = ("energetic", "tired-but-sharp", "playful", "contrarian", "tender")
+
+
+class HostMood(BaseModel):
+    """One host's sampled mood for this whole episode — episode-level, not
+    per-story (contrast OutlineStory.stances, which vary story to story).
+    `mood` is code-sampled (podcast.stages.outline._sample_moods, seeded
+    from the episode_id so a re-run reproduces the same moods, and
+    excluding that host's mood in the immediately preceding episode so two
+    episodes running don't feel identical) — the same "code computes what
+    code can compute" reasoning as OutlineStory.word_budget/is_primer, not
+    asked of the model. `reason` is the one thing that genuinely needs the
+    model: a one-line justification tied to today's actual stories, not a
+    generic explanation that could apply to any episode. See
+    docs/decisions.md ("Persona rigidity")."""
+
+    host: str
+    mood: Literal[MOOD_OPTIONS]
+    reason: str  # one line, tied to today's stories
+
+
 class OutlineStory(BaseModel):
     headline: str
     source_ids: list[str]  # subset of the ranked articles' source_ids this story is grounded in
@@ -420,6 +441,11 @@ class OutlineStory(BaseModel):
 class Outline(BaseModel):
     title: str
     stories: list[OutlineStory]  # already in the intended narrative order
+    # One per host, episode-wide — see HostMood. Defaults to [] so an
+    # outline.json persisted before this field existed still validates
+    # (podcast.stages.outline._previous_episode_moods relies on exactly
+    # this default when looking at an old episode).
+    host_moods: list[HostMood] = Field(default_factory=list)
 
 
 class OutlineOutput(BaseModel):
@@ -685,6 +711,11 @@ class QualityOutput(BaseModel):
     grounding: GroundingQuality
     naturalness: NaturalnessQuality
     judge: QualityJudge
+    # Copied straight from outline.json's own host_moods — not recomputed —
+    # so the dashboard/episode card can show mood varying episode to
+    # episode without a second read. See docs/decisions.md ("Persona
+    # rigidity").
+    host_moods: list[HostMood] = Field(default_factory=list)
     usage: list[TokenUsage] = Field(default_factory=list)  # the one judge call
 
 

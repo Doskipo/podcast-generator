@@ -28,7 +28,15 @@ from fastapi.staticfiles import StaticFiles
 from sqlmodel import select
 
 from podcast import db, scheduler, service
-from podcast.api import routes_episodes, routes_interests, routes_metrics, routes_profile, routes_schedule, routes_voices
+from podcast.api import (
+    routes_episodes,
+    routes_hosts,
+    routes_interests,
+    routes_metrics,
+    routes_profile,
+    routes_schedule,
+    routes_voices,
+)
 from podcast.models import Profile
 
 logger = logging.getLogger(__name__)
@@ -80,6 +88,7 @@ app.include_router(routes_metrics.router, prefix="/api")
 app.include_router(routes_schedule.router, prefix="/api")
 app.include_router(routes_interests.router, prefix="/api")
 app.include_router(routes_voices.router, prefix="/api")
+app.include_router(routes_hosts.router, prefix="/api")
 
 # Static SPA, registered LAST so it never shadows an API route above: FastAPI
 # matches routes in registration order, and the catch-all path parameter

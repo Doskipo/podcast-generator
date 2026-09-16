@@ -1746,6 +1746,100 @@ the server restarted..." resilience message and the ElevenLabs `quota_exceeded`-
 reason both showed up correctly in the same dashboard view, confirming those two features and
 this one compose cleanly.
 
+## Persona rigidity — 2026-09-16
+Two related problems with fixed two-host personas over many episodes: (1) a persona's literal
+`Catchphrase:` line gets said too often because nothing actually limits it, and (2) every episode
+of the same show sounds the same, because the personas are static and nothing about the writing
+varies episode to episode. Four changes, all landing together since they share the same root
+cause (persona text treated as a script to reuse verbatim, rather than a voice to write *from*).
+
+### Catchphrases: at most once per episode, never in the cold open — enforced in critique
+No new `Host` field for this — a catchphrase, where one exists, is still just a line inside
+`Host.persona` (`profiles/eudald.yaml`'s two hosts each have one, formatted `Catchphrase: "..."`).
+`critique.py:_declared_catchphrases` parses that line per host with a regex; a persona without one
+(any tendency-style persona going forward — see below) is simply skipped, not an error. Enforcement
+is two layers, the same "prompt instruction + hard backstop" pattern the stage already uses for
+grounding:
+- The critique prompt gets a new flaggable issue, `repeated_catchphrase`, plus a computed block
+  (mirroring the existing `over_length_line`/`repeated_correct_line` blocks) listing any violation
+  already present in the draft, so the model has a concrete "fix this" list, not just an abstract
+  rule.
+- `critique_stage`'s `validate()` closure — which already re-checks grounding on the critique the
+  model would produce before accepting it — now also calls `_catchphrase_violations` on the
+  revised script and raises if any remain. This makes it a real gate, not just a suggestion: a
+  critique response that leaves a catchphrase used twice, or at all in the cold open, forces
+  `generate_with_retry`'s one retry exactly like a grounding failure does.
+
+Deliberately scoped to *declared* catchphrases (an explicit persona line), not a generic "any
+4-word phrase repeated anywhere" rule. `quality.py:_catchphrase_count` already measures emergent
+repetition as a soft naturalness *proxy* (see "Quality metrics" above) — turning that same
+heuristic into a hard validation gate would risk spurious retries on ordinary repeated phrasing
+("I think that", "on the other hand") that isn't actually a persona catchphrase. The two mechanisms
+intentionally stay separate: one measures, the other enforces, and only the second acts on
+something a human actually wrote as a signature line.
+
+### Per-episode mood, sampled by code, written by the model
+Added `HostMood {host, mood, reason}` and `MOOD_OPTIONS` (`energetic`, `tired-but-sharp`,
+`playful`, `contrarian`, `tender`) to `models.py`, and `Outline.host_moods: list[HostMood]`
+(defaults to `[]` for backward compatibility with outlines persisted before this field existed).
+Consistent with every other "code computes what code can compute" decision in this codebase
+(`OutlineStory.word_budget`, `is_primer`): `outline_stage` samples the mood itself
+(`_sample_moods`, `random.Random`) rather than asking the model to choose from five options — the
+model's only job is `reason`, a one-line justification tied to *today's* actual stories, via the
+same "object with one required field per host" structural-schema trick `stances` already uses
+(`mood_reasons_model` alongside `stances_model` in `_response_model`).
+- **Seeded, not random-random**: `random.Random(episode.episode_id)`, not the unseeded global
+  `random` module or the wall clock — re-running `outline_stage` for the same episode (a
+  `--from-*`/`--until` rerun during development, or debugging a specific episode) reproduces the
+  same moods. `random.seed()` on a string uses a stable hash, so this holds across process runs
+  too, not just within one.
+- **Excludes the previous episode's mood per host**: `_previous_episode_moods` scans
+  `paths.EPISODES_DIR` directly for the nearest earlier episode (by the timestamp-sortable
+  directory name) whose `outline.json` has `host_moods` populated, and returns `{host: mood}` from
+  it — `{}` for the first episode ever, when no earlier episode reached outline, or when the
+  nearest earlier `outline.json` predates this field. `_sample_moods` then excludes each host's
+  previous mood from that episode's draw (falling back to the full option set if there's nothing
+  to exclude), so the same host doesn't get the same mood two episodes running. This is the one
+  place in the outline stage that reads a sibling episode's artefacts, not just its own — the same
+  "read a sibling artefact off disk" pattern `quality_stage` already uses for `outline.json` /
+  `script.json` / `critique.json`, just reaching one directory further back instead of into the
+  current one.
+- **Propagated to script and perform, not just outline**: both `script.py` and `perform.py` gained
+  `_render_host_persona(host, mood_by_host)` (perform's reads `outline.json` off disk via
+  `load_outline_output`, the same sibling-artefact pattern, since `perform_stage` never had
+  `OutlineOutput` in its own signature) — persona text plus a `Mood this episode: <mood> —
+  <reason>` line, rendered per host in the system prompt, with an instruction to write from both
+  together without letting the mood override a story's stance or invent persona-inconsistent
+  behaviour. `quality.py`'s `QualityOutput` also gained `host_moods` (copied straight from
+  `outline_output.outline.host_moods`, not recomputed) specifically so mood varying episode to
+  episode is visible somewhere in the UI/dashboard over time, not just present in the artefacts.
+
+### Personas describe tendencies, not fixed lines
+Added one standing instruction, verbatim in all three writing-stage system prompts (outline,
+script, perform): *"Each host's persona describes their tendencies and voice — background,
+general speech patterns, what they gravitate to — not a script of fixed lines to reuse. Nothing
+below should read as quoting the persona verbatim."* This is a prompt-wording change only — Alice
+and Bob's existing persona text (`Catchphrase:` line included) was deliberately **not** rewritten;
+the catchphrase-enforcement mechanism above is what actually keeps a fixed line rare, not editing
+the persona itself. Every *new* persona going forward (the two new presets below) simply omits a
+`Catchphrase:` line in the first place, since there's no field or format requiring one.
+
+### Host presets
+`presets/hosts/*.yaml`, one `Host`-shaped file each (`alice.yaml`, `bob.yaml` — faithful,
+unmodified copies of `profiles/eudald.yaml`'s two hosts, including Alice's and Bob's
+`Catchphrase:` lines — plus two new ones written in the tendencies-only format above: `priya.yaml`,
+a precise, hedging policy-analyst register, and `theo.yaml`, a fast, informal, internet-culture
+register). `host_presets.load_host_presets()` parses every file in the directory (sorted by
+filename for a stable order) into `Host` objects — no new Pydantic model, since a preset is
+exactly the shape of a `podcast.hosts[]` entry already. `GET /api/hosts/presets`
+(`routes_hosts.py`) exposes the list. In Settings, `HostEditor`'s `HostRow` gained a "Preset"
+`<select>` next to Name/Voice: picking one overwrites that row's `name`/`voice_id`/`persona`/
+`home_turf` in place and then remounts itself (via a `key` bump) back to the placeholder — a
+preset fills the row once, it isn't a live binding, and every field stays freely editable
+afterward exactly as if typed by hand. The persona textarea's placeholder text also dropped its
+old "...speech pattern, catchphrase..." wording, consistent with the tendencies-not-fixed-lines
+framing above.
+
 ## Future work.
 - Add **suggest topics from previous episodes** from the previous podcasts. So it generatos a topic 
 (or a bunch of topics) for a podcast for you.

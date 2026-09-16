@@ -17,6 +17,7 @@ word-budget/listener-fact/line-length checks added here.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 
 from openai import OpenAI
@@ -28,6 +29,7 @@ from podcast.models import (
     Critique,
     CritiqueOutput,
     Episode,
+    Host,
     HostBrevityFlag,
     Line,
     Outline,
@@ -107,6 +109,48 @@ def _repeated_correct_line_indices(script: Script) -> list[int]:
     return indices
 
 
+# Matches a `Catchphrase: "..."` line inside a Host.persona free-text block
+# — the format profiles/eudald.yaml's two current hosts use (see
+# docs/decisions.md, "Persona rigidity"). Not every persona declares one:
+# newer, tendency-style personas deliberately don't, and are simply skipped
+# by _declared_catchphrases below.
+_CATCHPHRASE_RE = re.compile(r'^\s*Catchphrase:\s*"([^"]+)"\s*$', re.MULTILINE)
+
+
+def _declared_catchphrases(hosts: list[Host]) -> dict[str, str]:
+    """host name -> their literal catchphrase, for every host whose persona
+    declares one. Personas describe tendencies, not fixed lines to reuse
+    (see docs/decisions.md, "Persona rigidity") — but the two current hosts
+    were carried over with their existing Catchphrase: line intact, so this
+    stage is what actually keeps that fixed line rare rather than rewriting
+    the persona text itself."""
+    result: dict[str, str] = {}
+    for host in hosts:
+        match = _CATCHPHRASE_RE.search(host.persona)
+        if match:
+            result[host.name] = match.group(1)
+    return result
+
+
+def _catchphrase_violations(script: Script, catchphrases: dict[str, str]) -> list[str]:
+    """Human-readable descriptions of every catchphrase rule break in
+    `script` — at most once per episode, never in the cold open. Matching
+    is a case-insensitive substring check against each line's text (the
+    catchphrase doesn't need to be the entire line, just present in it).
+    Used both to steer the critique prompt and, unconditionally, as
+    critique_stage's hard validation backstop."""
+    violations: list[str] = []
+    for host_name, phrase in catchphrases.items():
+        needle = phrase.lower()
+        cold_open_hits = sum(1 for line in script.cold_open if line.speaker == host_name and needle in line.text.lower())
+        if cold_open_hits:
+            violations.append(f"{host_name}'s catchphrase (\"{phrase}\") appears in the cold open — never allowed there")
+        total_hits = sum(1 for line in flatten_lines(script) if line.speaker == host_name and needle in line.text.lower())
+        if total_hits > 1:
+            violations.append(f"{host_name}'s catchphrase (\"{phrase}\") appears {total_hits} times — at most once per episode")
+    return violations
+
+
 def _build_prompts(profile: Profile, script: Script, outline: Outline) -> tuple[str, str]:
     persona_block = "\n\n".join(f"{host.name}:\n{host.persona}" for host in profile.podcast.hosts)
     listener = profile.podcast.listener
@@ -132,6 +176,24 @@ def _build_prompts(profile: Profile, script: Script, outline: Outline) -> tuple[
         else ""
     )
 
+    catchphrases = _declared_catchphrases(profile.podcast.hosts)
+    catchphrase_declared_line = (
+        "Declared catchphrases (each allowed at most once per episode, never in the cold "
+        "open — flag a violation with issue \"repeated_catchphrase\" and rewrite it into "
+        "something new in the host's voice, not the fixed phrase):\n"
+        + "\n".join(f'- {name}: "{phrase}"' for name, phrase in catchphrases.items())
+        + "\n"
+        if catchphrases
+        else ""
+    )
+    catchphrase_violations = _catchphrase_violations(script, catchphrases)
+    catchphrase_violation_line = (
+        f"These catchphrase rule violations exist right now and must be fixed: "
+        f"{'; '.join(catchphrase_violations)}.\n"
+        if catchphrase_violations
+        else ""
+    )
+
     system_prompt = (
         "You are a script editor for a two-host podcast, reviewing a draft for how it "
         "will sound spoken out loud.\n\n"
@@ -149,9 +211,12 @@ def _build_prompts(profile: Profile, script: Script, outline: Outline) -> tuple[
         "disfluencies ('I mean', 'no?', 'okay so', 'look', 'wait'), no self-corrections, "
         "no mid-line tone shift, too clean and complete to be something a person just said\n"
         "- too_long: see below\n"
-        "- repeated_correct: see below\n\n"
+        "- repeated_correct: see below\n"
+        "- repeated_catchphrase: see below\n\n"
         f"{over_length_line}"
-        f"{repeated_correct_line}\n"
+        f"{repeated_correct_line}"
+        f"{catchphrase_declared_line}"
+        f"{catchphrase_violation_line}\n"
         "For each flagged line, give its index (as shown in the numbered script below), "
         "an issue label, and rewritten_lines — normally a single rewritten line that fixes "
         "it while keeping the same meaning, speaker, and any facts it cites, but for a "
@@ -279,6 +344,7 @@ def critique_stage(
 
     system_prompt, user_prompt = _build_prompts(profile, original_script, outline)
     known_ids = {a.source_id for a in articles}
+    catchphrases = _declared_catchphrases(profile.podcast.hosts)
 
     # See outline.py's outline_stage for why this is a local accumulator
     # rather than a tuple threaded through generate_with_retry: a rejected
@@ -294,10 +360,22 @@ def critique_stage(
         # Grounding can only be re-checked on the script the critique would
         # actually produce, so validation here applies it first (pure,
         # deterministic, cheap to redo below with the validated critique).
-        validate_source_ids(_apply_critique(original_script, critique), known_ids)
+        revised = _apply_critique(original_script, critique)
+        validate_source_ids(revised, known_ids)
+        # Hard backstop, not just a prompt instruction — see
+        # docs/decisions.md ("Persona rigidity"): a catchphrase used twice,
+        # or at all in the cold open, forces the one retry-with-feedback
+        # rather than shipping as-is.
+        violations = _catchphrase_violations(revised, catchphrases)
+        if violations:
+            raise ValueError(f"catchphrase rule violated: {'; '.join(violations)}")
 
     critique, retried = generate_with_retry(generate, validate, user_prompt, stage_name="critique")
     revised_script = _apply_critique(original_script, critique)
+
+    for host_name, phrase in catchphrases.items():
+        count = sum(1 for line in flatten_lines(revised_script) if line.speaker == host_name and phrase.lower() in line.text.lower())
+        logger.info("critique: %s catchphrase %r used %d time(s) this episode", host_name, phrase, count)
 
     total_words = sum(len(line.text.split()) for line in flatten_lines(revised_script))
     over_budget_segments = _budget_flags(outline, revised_script)
