@@ -87,8 +87,27 @@ export default function QualityPanel({ quality }) {
             value={grounding.total_retries}
             why={`Stage(s) that needed generate_with_retry's one retry: ${retriedStages.length ? retriedStages.join(', ') : 'none'}.`}
           />
+          <Stat
+            label="Word overrun"
+            value={grounding.word_overrun > 0 ? `+${grounding.word_overrun}w` : 'within cap'}
+            why="Words the final performance exceeds perform's word cap by, after one regeneration attempt. A quality signal, not a correctness invariant — an overrun never fails the run."
+          />
         </div>
       </div>
+
+      {grounding.repairs.length > 0 && (
+        <div>
+          <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-ink/40">Auto-repaired</h4>
+          <ul className="space-y-1 text-xs text-ink/70">
+            {grounding.repairs.map((repair, i) => (
+              // eslint-disable-next-line react/no-array-index-key -- repairs are plain strings with no stable id
+              <li key={i} className="rounded-md bg-ink/5 px-2 py-1">
+                {repair}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       <div>
         <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-ink/40">Naturalness proxies</h4>

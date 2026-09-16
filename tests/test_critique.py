@@ -615,11 +615,12 @@ def test_build_prompts_omits_catchphrase_lines_when_no_host_declares_one():
     assert "Declared catchphrases" not in system_prompt  # but no host has one to declare
 
 
-def test_critique_stage_retries_when_catchphrase_rule_still_violated(tmp_path, monkeypatch):
-    """Hard backstop, not just a prompt instruction — see
-    docs/decisions.md ("Persona rigidity"): a critique response that leaves
-    a catchphrase used twice must trigger generate_with_retry's one retry,
-    exactly like a bad grounding response does."""
+def test_critique_stage_regenerates_once_when_catchphrase_rule_still_violated(tmp_path, monkeypatch):
+    """A quality signal, not a correctness invariant (see docs/decisions.md,
+    "Correctness invariants vs quality signals") — a catchphrase used twice
+    gets one regeneration attempt through critique_stage's own bespoke
+    retry (not generate_with_retry, which never sees a reason to retry
+    here since grounding is fine on the first attempt)."""
     phrase = "Okay, but just imagine this for a second..."
     profile = _profile()
     profile.podcast.hosts = [_host_with_catchphrase("Nova", phrase), _host("Max")]
@@ -654,12 +655,18 @@ def test_critique_stage_retries_when_catchphrase_rule_still_violated(tmp_path, m
     output = critique_module.critique_stage(episode, script_output, articles, outline_output, client=object())
 
     assert len(prompts) == 2
-    assert "catchphrase rule violated" in prompts[1]  # the validation error, fed back verbatim
+    assert "appears 2 times" in prompts[1]  # the violation, fed back verbatim
     assert output.retried is True
     assert output.revised_script.outro[0].text == "See you next time."
+    assert len(output.repairs) == 1
+    assert "fixed by regenerating" in output.repairs[0]
 
 
-def test_critique_stage_raises_when_catchphrase_rule_violated_twice(tmp_path, monkeypatch):
+def test_critique_stage_keeps_script_and_flags_repair_when_catchphrase_rule_still_violated_after_retry(tmp_path, monkeypatch):
+    """A cap is a quality signal: if the one regeneration attempt doesn't
+    fix it, the run must still succeed — the revised script is kept as-is
+    and the remaining violation recorded on CritiqueOutput.repairs, never
+    raised."""
     phrase = "Okay, but just imagine this for a second..."
     profile = _profile()
     profile.podcast.hosts = [_host_with_catchphrase("Nova", phrase), _host("Max")]
@@ -678,10 +685,13 @@ def test_critique_stage_raises_when_catchphrase_rule_violated_twice(tmp_path, mo
     monkeypatch.setattr(critique_module, "_generate_critique", fake_generate_critique)
     _patch_episode_dir(monkeypatch, tmp_path)
 
-    with pytest.raises(ValueError, match="catchphrase rule violated"):
-        critique_module.critique_stage(episode, script_output, articles, outline_output, client=object())
+    output = critique_module.critique_stage(episode, script_output, articles, outline_output, client=object())  # does not raise
 
-    assert len(prompts) == 2  # exactly one retry, no more
+    assert len(prompts) == 2  # exactly one regeneration attempt, no more
+    assert output.retried is True
+    assert len(output.repairs) == 1
+    assert "still present after one regeneration attempt" in output.repairs[0]
+    assert "cold open" in output.repairs[0]
 
 
 def test_critique_stage_logs_catchphrase_usage_count(tmp_path, monkeypatch, caplog):
@@ -781,8 +791,8 @@ def test_build_prompts_includes_listener_name_rule_and_current_violations():
     assert "mid-explanation" in system_prompt or "segment" in system_prompt
 
 
-def test_critique_stage_retries_when_listener_name_rule_still_violated(tmp_path, monkeypatch):
-    """Hard backstop, not just a prompt instruction — mirrors the
+def test_critique_stage_regenerates_once_when_listener_name_rule_still_violated(tmp_path, monkeypatch):
+    """A quality signal, not a correctness invariant — mirrors the
     catchphrase enforcement above."""
     profile = _profile()
     episode = _episode(profile)
@@ -817,12 +827,14 @@ def test_critique_stage_retries_when_listener_name_rule_still_violated(tmp_path,
     output = critique_module.critique_stage(episode, script_output, articles, outline_output, client=object())
 
     assert len(prompts) == 2
-    assert "listener name rule violated" in prompts[1]  # the validation error, fed back verbatim
+    assert "mid-explanation" in prompts[1]  # the violation, fed back verbatim
     assert output.retried is True
     assert output.revised_script.segments[0].lines[0].text == "Here's the story."
+    assert len(output.repairs) == 1
+    assert "fixed by regenerating" in output.repairs[0]
 
 
-def test_critique_stage_raises_when_listener_name_rule_violated_twice(tmp_path, monkeypatch):
+def test_critique_stage_keeps_script_and_flags_repair_when_listener_name_rule_still_violated_after_retry(tmp_path, monkeypatch):
     profile = _profile()
     episode = _episode(profile)
     articles = [_article("abcd1234")]
@@ -840,10 +852,13 @@ def test_critique_stage_raises_when_listener_name_rule_violated_twice(tmp_path, 
     monkeypatch.setattr(critique_module, "_generate_critique", fake_generate_critique)
     _patch_episode_dir(monkeypatch, tmp_path)
 
-    with pytest.raises(ValueError, match="listener name rule violated"):
-        critique_module.critique_stage(episode, script_output, articles, outline_output, client=object())
+    output = critique_module.critique_stage(episode, script_output, articles, outline_output, client=object())  # does not raise
 
-    assert len(prompts) == 2  # exactly one retry, no more
+    assert len(prompts) == 2  # exactly one regeneration attempt, no more
+    assert output.retried is True
+    assert len(output.repairs) == 1
+    assert "still present after one regeneration attempt" in output.repairs[0]
+    assert "at most once per episode" in output.repairs[0]
 
 
 def test_critique_stage_logs_listener_name_usage_count(tmp_path, monkeypatch, caplog):

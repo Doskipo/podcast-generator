@@ -23,6 +23,7 @@ import logging
 from datetime import datetime, timezone
 
 from openai import OpenAI
+from pydantic import BaseModel, create_model
 
 from podcast.artefacts import load_outline_output
 from podcast.env import require_env
@@ -37,6 +38,7 @@ from podcast.models import (
     HostMood,
     Performance,
     PerformedLine,
+    PerformedSegment,
     PerformOutput,
     Profile,
     Script,
@@ -146,27 +148,90 @@ def _build_performance_prompts(profile: Profile, script: Script, host_moods: lis
     return system_prompt, user_prompt
 
 
-def _generate_performance(client: OpenAI, model: str, system_prompt: str, user_prompt: str) -> tuple[Performance, TokenUsage]:
-    """Boundary around the OpenAI call — the seam tests monkeypatch."""
+def _response_model(segment_count: int) -> type[BaseModel]:
+    """A structured-output schema shaped like Performance, except `segments`
+    is not a homogeneous `list[PerformedSegment]` (which lets the model
+    return any number of segments — the actual cause of a real "performance
+    has N segment(s), expected M" failure) but an object with one required
+    field per segment index, `segment_0`..`segment_{segment_count-1}` — the
+    same "object with a required key per slot" trick outline.py's stances
+    and later-story transition use to make a count true by construction
+    rather than checked after the fact. See docs/decisions.md ("Structural
+    transitions", "Correctness invariants vs quality signals")."""
+    segments_model = create_model(
+        "PerformanceSegmentsResponse",
+        **{f"segment_{i}": (PerformedSegment, ...) for i in range(segment_count)},
+    )
+    return create_model(
+        "PerformanceResponse",
+        title=(str, ...),
+        cold_open=(list[PerformedLine], ...),
+        segments=(segments_model, ...),
+        outro=(list[PerformedLine], ...),
+    )
+
+
+def _generate_performance(
+    client: OpenAI, model: str, system_prompt: str, user_prompt: str, segment_count: int
+) -> tuple[Performance, TokenUsage]:
+    """Boundary around the OpenAI call — the seam tests monkeypatch. Builds
+    the segment_count-constrained schema (see _response_model), then
+    reassembles the per-index segment fields back into Performance.segments,
+    in order."""
+    response_model = _response_model(segment_count)
     completion = client.chat.completions.parse(
         model=model,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        response_format=Performance,
+        response_format=response_model,
     )
+    parsed = completion.choices[0].message.parsed
+    segments = [getattr(parsed.segments, f"segment_{i}") for i in range(segment_count)]
+    performance = Performance(title=parsed.title, cold_open=parsed.cold_open, segments=segments, outro=parsed.outro)
     usage = TokenUsage(
         model=model, prompt_tokens=completion.usage.prompt_tokens, completion_tokens=completion.usage.completion_tokens
     )
-    return completion.choices[0].message.parsed, usage
+    return performance, usage
+
+
+def _reconcile_segment_count(performance: Performance, original: Script) -> tuple[Performance, str | None]:
+    """Defensive backstop, not the normal path — _response_model's schema
+    already fixes the segment count structurally, so the model can't
+    actually return the wrong number of segments through the real API. If
+    a performance somehow still arrives with too many anyway, keep the
+    first len(original.segments) positionally (drop the extras) rather
+    than failing the whole run over a count a structurally-required schema
+    should never let through in the first place. There's nothing
+    equivalent to do for too FEW — no segment to positionally map from —
+    so that's left to _validate_segment_structure's count check, which
+    still raises: segment structure is a correctness invariant, not a
+    quality signal. See docs/decisions.md ("Correctness invariants vs
+    quality signals"). Returns the (possibly trimmed) performance plus a
+    repair description, or None if nothing needed fixing."""
+    if len(performance.segments) > len(original.segments):
+        dropped = len(performance.segments) - len(original.segments)
+        logger.warning(
+            "perform: performance had %d segment(s), expected %d — dropping the extra %d",
+            len(performance.segments), len(original.segments), dropped,
+        )
+        performance = performance.model_copy(update={"segments": performance.segments[: len(original.segments)]})
+        return performance, f"performance had {dropped} extra segment(s) — dropped positionally"
+    return performance, None
 
 
 def _validate_segment_structure(performance: Performance, original: Script) -> None:
     """Segment count, and each segment's (and the outro's) line count AND
     speaker sequence, must match the original 1:1 — only text/delivery/
     pause_ms may differ. This is what keeps grounding/meaning safe by
-    construction, the same philosophy as critique.py's _apply_critique."""
+    construction, the same philosophy as critique.py's _apply_critique. A
+    correctness invariant, not a quality signal (see docs/decisions.md,
+    "Correctness invariants vs quality signals") — still raises and still
+    ends the run if generate_with_retry's one retry doesn't fix it.
+    _reconcile_segment_count already trims a too-many mismatch before this
+    ever runs, so in practice this now only fires for a genuine shortfall
+    or a speaker-order break, neither of which can be safely auto-repaired."""
     if len(performance.segments) != len(original.segments):
         raise ValueError(
             f"performance has {len(performance.segments)} segment(s), expected "
@@ -215,25 +280,30 @@ def _validate_speakers(performance: Performance, known_speakers: set[str]) -> No
         raise ValueError(f"performance uses unknown speaker(s) {sorted(unknown)}; known hosts are {sorted(known_speakers)}")
 
 
-def _validate_word_cap(performance: Performance, original: Script) -> None:
-    """The performed script's total word count (cold_open + segments +
-    outro, including any added chit-chat) may not exceed the original's by
-    more than MAX_WORD_OVERRUN — rewriting for flow is not license to pad."""
+def _word_overrun(performance: Performance, original: Script) -> int:
+    """How many words `performance`'s total (cold_open + segments + outro,
+    including any added chit-chat) exceeds the original's MAX_WORD_OVERRUN
+    cap by — 0 if it's within cap. A quality signal, not a correctness
+    invariant (see docs/decisions.md, "Correctness invariants vs quality
+    signals"): unlike _validate_segment_structure/_validate_cold_open_
+    suffix/_validate_speakers, this never raises — perform_stage gives an
+    overrun one regeneration attempt, then keeps the performance and
+    records whatever overrun remains rather than failing the run over it."""
     original_words = sum(len(line.text.split()) for line in flatten_lines(original))
     performed_words = sum(len(line.text.split()) for line in flatten_performed_lines(performance))
     max_words = int(original_words * (1 + MAX_WORD_OVERRUN))
-    if performed_words > max_words:
-        raise ValueError(
-            f"performance is {performed_words} words, over the {max_words}-word cap "
-            f"({int(MAX_WORD_OVERRUN * 100)}% over the original script's {original_words} words) — trim it"
-        )
+    return max(0, performed_words - max_words)
 
 
 def _validate_performance(performance: Performance, original: Script, known_speakers: set[str]) -> None:
+    """Correctness invariants only — grounding-adjacent structure that, if
+    wrong, would mean the episode says something different from what
+    critique reviewed. The word cap is deliberately not checked here: it's
+    a quality signal, not a correctness invariant — see _word_overrun and
+    docs/decisions.md ("Correctness invariants vs quality signals")."""
     _validate_segment_structure(performance, original)
     _validate_cold_open_suffix(performance, original)
     _validate_speakers(performance, known_speakers)
-    _validate_word_cap(performance, original)
 
 
 def _apply_grounding(performance: Performance, original: Script) -> Performance:
@@ -333,21 +403,70 @@ def perform_stage(
     host_moods = outline_output.outline.host_moods
 
     system_prompt, user_prompt = _build_performance_prompts(profile, original_script, host_moods)
+    segment_count = len(original_script.segments)
 
     # See outline.py's outline_stage for why this is a local accumulator
     # rather than a tuple threaded through generate_with_retry: a rejected
     # first attempt still cost real tokens.
     usage: list[TokenUsage] = []
+    # Human-readable descriptions of quality-signal repairs made this run
+    # — see PerformOutput.repairs and docs/decisions.md ("Correctness
+    # invariants vs quality signals").
+    repairs: list[str] = []
 
     def generate(prompt: str) -> Performance:
-        performance, call_usage = _generate_performance(client, profile.llm.script_model, system_prompt, prompt)
+        performance, call_usage = _generate_performance(
+            client, profile.llm.script_model, system_prompt, prompt, segment_count
+        )
         usage.append(call_usage)
+        performance, repair = _reconcile_segment_count(performance, original_script)
+        if repair:
+            repairs.append(repair)
         return performance
 
     def validate(performance: Performance) -> None:
         _validate_performance(performance, original_script, known_speakers)
 
     performance, retried = generate_with_retry(generate, validate, user_prompt, stage_name="perform")
+
+    # Word cap: a quality signal, not a correctness invariant (see
+    # docs/decisions.md, "Correctness invariants vs quality signals") —
+    # gets one regeneration attempt, feedback-driven like
+    # generate_with_retry's own retry, but is never allowed to fail the
+    # run. If the regeneration doesn't fully resolve it (or itself breaks a
+    # correctness invariant), the ORIGINAL performance is kept and its
+    # overrun is recorded on PerformOutput.word_overrun for quality_stage
+    # to flag — never discarded for a version that's unverified or worse.
+    word_overrun = _word_overrun(performance, original_script)
+    if word_overrun:
+        overrun_before = word_overrun
+        logger.warning("perform: performance is %d word(s) over the word cap — regenerating once", word_overrun)
+        # Counts as a retry (tokens spent either way — see usage below)
+        # regardless of whether the regeneration actually resolves the
+        # overrun: unlike generate_with_retry's own `retried`, this is set
+        # the moment a second attempt is made, not only on a successful one.
+        retried = True
+        retry_prompt = (
+            f"{user_prompt}\n\n"
+            f"Your previous response was invalid: performance is {word_overrun} word(s) over the word cap.\n"
+            "Correct this and respond again, following all the same instructions."
+        )
+        try:
+            candidate = generate(retry_prompt)
+            validate(candidate)
+        except ValueError as exc:
+            logger.warning("perform: word-cap regeneration broke a correctness invariant, keeping the original: %s", exc)
+            candidate = None
+        if candidate is not None and _word_overrun(candidate, original_script) == 0:
+            performance, word_overrun = candidate, 0
+            repairs.append(f"word cap exceeded by {overrun_before} word(s) — resolved by regenerating")
+        else:
+            logger.warning(
+                "perform: still %d word(s) over the word cap after regenerating — keeping the performance, "
+                "flagging the overrun in quality.json instead of failing the run", word_overrun
+            )
+            repairs.append(f"word cap exceeded by {word_overrun} word(s) after one regeneration attempt — kept as-is")
+
     performance = _apply_grounding(performance, original_script)
     validate_performed_source_ids(performance, known_ids)
 
@@ -364,6 +483,8 @@ def perform_stage(
         fact_flags=fact_flags,
         usage=usage,
         retried=retried,
+        word_overrun=word_overrun,
+        repairs=repairs,
     )
 
     out_path = episode_dir(episode.episode_id) / "performance.json"

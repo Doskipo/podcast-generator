@@ -74,6 +74,12 @@ def _grounding_quality(
     original_line_count = len(flatten_lines(critique_output.original_script))
     critique_rewrite_rate = (critique_flags / original_line_count) if original_line_count else 0.0
 
+    repairs = (
+        [f"outline: {r}" for r in outline_output.repairs]
+        + [f"critique: {r}" for r in critique_output.repairs]
+        + [f"perform: {r}" for r in perform_output.repairs]
+    )
+
     return GroundingQuality(
         source_count=source_count,
         evergreen_share=round(evergreen_share, 4),
@@ -82,6 +88,8 @@ def _grounding_quality(
         critique_rewrite_rate=round(critique_rewrite_rate, 4),
         stage_retries=stage_retries,
         total_retries=sum(stage_retries.values()),
+        word_overrun=perform_output.word_overrun,
+        repairs=repairs,
     )
 
 

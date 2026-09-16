@@ -5,6 +5,7 @@ _generate_fact_check seams.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -182,7 +183,7 @@ def _patch_episode_dir(monkeypatch, tmp_path: Path, episode_id: str = "ep1") -> 
 def _patch_generation(monkeypatch, performance: Performance, fact_flags: list[FactChangeFlag] | None = None):
     prompts: list[str] = []
 
-    def fake_generate_performance(client, model, system_prompt, user_prompt):
+    def fake_generate_performance(client, model, system_prompt, user_prompt, segment_count):
         prompts.append(user_prompt)
         return performance, _FIXTURE_USAGE
 
@@ -309,24 +310,13 @@ def test_perform_stage_rejects_unknown_speaker(tmp_path, monkeypatch):
         perform_module.perform_stage(episode, critique_output, articles, client=object())
 
 
-def test_perform_stage_rejects_performance_over_word_cap(tmp_path, monkeypatch):
-    profile = _profile()
-    episode = _episode(profile)
-    articles = [_article("abcd1234")]
-    critique_output = _critique_output(episode.episode_id, "abcd1234")
-
-    bad_performance = _valid_performance(extra_cold_open=False)
-    # pad one line's text far past the +5% word cap, structure untouched
-    bad_performance.segments[0].lines[0] = PerformedLine(speaker="Nova", text="So get THIS — " + "padding " * 20)
-
-    _patch_generation(monkeypatch, bad_performance)
-    _patch_episode_dir(monkeypatch, tmp_path)
-
-    with pytest.raises(ValueError, match="word cap"):
-        perform_module.perform_stage(episode, critique_output, articles, client=object())
-
-
-def test_perform_stage_retries_when_over_word_cap_then_succeeds(tmp_path, monkeypatch):
+def test_perform_stage_regenerates_once_when_over_word_cap_then_succeeds(tmp_path, monkeypatch):
+    """The word cap is a quality signal, not a correctness invariant (see
+    docs/decisions.md, "Correctness invariants vs quality signals") — an
+    overrun gets one regeneration attempt, same as a correctness-invariant
+    failure would, but through perform_stage's own bespoke retry, not
+    generate_with_retry (which never even sees a reason to retry here,
+    since the bloated performance is structurally valid)."""
     profile = _profile()
     episode = _episode(profile)
     articles = [_article("abcd1234")]
@@ -339,7 +329,7 @@ def test_perform_stage_retries_when_over_word_cap_then_succeeds(tmp_path, monkey
     attempts = {"n": 0}
     prompts: list[str] = []
 
-    def fake_generate_performance(client, model, system_prompt, user_prompt):
+    def fake_generate_performance(client, model, system_prompt, user_prompt, segment_count):
         prompts.append(user_prompt)
         attempts["n"] += 1
         return (bloated_performance if attempts["n"] == 1 else trimmed_performance), _FIXTURE_USAGE
@@ -354,25 +344,68 @@ def test_perform_stage_retries_when_over_word_cap_then_succeeds(tmp_path, monkey
     output = perform_module.perform_stage(episode, critique_output, articles, client=object())
 
     assert len(prompts) == 2
-    assert "word cap" in prompts[1]  # the validation error, fed back verbatim
+    assert "word cap" in prompts[1]  # the feedback, fed back verbatim
     assert output.performance.segments[0].lines[0].text == "So get THIS —"
     assert output.retried is True
+    assert output.word_overrun == 0
+    assert len(output.repairs) == 1
+    assert "resolved by regenerating" in output.repairs[0]
 
 
-def test_validate_word_cap_rejects_over_5_percent_overrun():
+def test_perform_stage_keeps_performance_and_flags_overrun_when_still_over_cap_after_retry(tmp_path, monkeypatch, caplog):
+    """A cap is a quality signal, not a correctness invariant: if the one
+    regeneration attempt doesn't fix it, the run must still succeed — the
+    over-cap performance is kept and the overrun recorded on
+    PerformOutput.word_overrun for quality_stage to flag, never raised."""
+    profile = _profile()
+    episode = _episode(profile)
+    articles = [_article("abcd1234")]
+    critique_output = _critique_output(episode.episode_id, "abcd1234")
+
+    bloated_performance = _valid_performance(extra_cold_open=False)
+    bloated_performance.segments[0].lines[0] = PerformedLine(speaker="Nova", text="So get THIS — " + "padding " * 20)
+
+    prompts: list[str] = []
+
+    def fake_generate_performance(client, model, system_prompt, user_prompt, segment_count):
+        prompts.append(user_prompt)
+        return bloated_performance, _FIXTURE_USAGE  # every attempt is still bloated
+
+    def fake_generate_fact_check(client, model, system_prompt, user_prompt):
+        return [], _FIXTURE_USAGE
+
+    monkeypatch.setattr(perform_module, "_generate_performance", fake_generate_performance)
+    monkeypatch.setattr(perform_module, "_generate_fact_check", fake_generate_fact_check)
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    with caplog.at_level(logging.WARNING, logger="podcast.stages.perform"):
+        output = perform_module.perform_stage(episode, critique_output, articles, client=object())  # does not raise
+
+    assert len(prompts) == 2  # the initial attempt plus the one cap-regeneration attempt
+    assert output.word_overrun > 0
+    assert output.retried is True  # a regeneration was attempted, even though it didn't stick
+    assert output.performance.segments[0].lines[0].text == bloated_performance.segments[0].lines[0].text
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("keeping the performance" in m and "flagging the overrun" in m for m in messages)
+
+    assert len(output.repairs) == 1
+    assert "kept as-is" in output.repairs[0]
+
+
+def test_word_overrun_is_positive_when_over_the_5_percent_cap():
     original = _original_script("abcd1234")
     performance = _valid_performance(extra_cold_open=False)
     performance.segments[0].lines[0] = PerformedLine(speaker="Nova", text="So get THIS — " + "padding " * 20)
 
-    with pytest.raises(ValueError, match="word cap"):
-        perform_module._validate_word_cap(performance, original)
+    assert perform_module._word_overrun(performance, original) > 0
 
 
-def test_validate_word_cap_accepts_within_5_percent():
+def test_word_overrun_is_zero_within_the_5_percent_cap():
     original = _original_script("abcd1234")
     performance = _valid_performance(extra_cold_open=False)
 
-    perform_module._validate_word_cap(performance, original)  # does not raise
+    assert perform_module._word_overrun(performance, original) == 0
 
 
 def test_perform_stage_retries_once_then_succeeds(tmp_path, monkeypatch):
@@ -388,7 +421,7 @@ def test_perform_stage_retries_once_then_succeeds(tmp_path, monkeypatch):
     attempts = {"n": 0}
     prompts: list[str] = []
 
-    def fake_generate_performance(client, model, system_prompt, user_prompt):
+    def fake_generate_performance(client, model, system_prompt, user_prompt, segment_count):
         prompts.append(user_prompt)
         attempts["n"] += 1
         return (bad_performance if attempts["n"] == 1 else good_performance), _FIXTURE_USAGE
@@ -420,7 +453,7 @@ def test_perform_stage_raises_after_second_failed_validation(tmp_path, monkeypat
 
     prompts: list[str] = []
 
-    def fake_generate_performance(client, model, system_prompt, user_prompt):
+    def fake_generate_performance(client, model, system_prompt, user_prompt, segment_count):
         prompts.append(user_prompt)
         return bad_performance, _FIXTURE_USAGE
 
@@ -553,7 +586,7 @@ def test_perform_stage_reads_moods_from_outline_json(tmp_path, monkeypatch):
 
     system_prompts: list[str] = []
 
-    def fake_generate_performance(client, model, system_prompt, user_prompt):
+    def fake_generate_performance(client, model, system_prompt, user_prompt, segment_count):
         system_prompts.append(system_prompt)
         return _valid_performance(), _FIXTURE_USAGE
 
@@ -575,3 +608,153 @@ def test_validate_performed_source_ids_rejects_unknown_id():
 
     with pytest.raises(ValueError, match="unknown-id"):
         perform_module.validate_performed_source_ids(performance, known_ids={"abcd1234"})
+
+
+# ---- segment-count structural fix (final polish, round 3, Part 1) ----------
+
+
+def _perf_segment_dict(headline: str, speaker: str, text: str) -> dict:
+    return {"headline": headline, "source_ids": ["a"], "lines": [{"speaker": speaker, "text": text}]}
+
+
+def test_response_model_requires_exactly_segment_count_segments():
+    """The structural fix for "performance has N segment(s), expected M":
+    segments isn't a homogeneous list (which lets the model return any
+    count) but an object with one required field per index, so the model
+    can't omit — or add — a segment through the real API."""
+    model = perform_module._response_model(2)
+
+    ok = model.model_validate(
+        {
+            "title": "t",
+            "cold_open": [{"speaker": "Nova", "text": "hi"}],
+            "segments": {
+                "segment_0": _perf_segment_dict("h0", "Nova", "first"),
+                "segment_1": _perf_segment_dict("h1", "Max", "second"),
+            },
+            "outro": [{"speaker": "Max", "text": "bye"}],
+        }
+    )
+    assert ok.segments.segment_0.headline == "h0"
+    assert ok.segments.segment_1.headline == "h1"
+
+    # missing segment_1 — a shortfall — is rejected at the schema level,
+    # the exact failure mode this fixes
+    with pytest.raises(ValueError):
+        model.model_validate(
+            {
+                "title": "t",
+                "cold_open": [{"speaker": "Nova", "text": "hi"}],
+                "segments": {"segment_0": _perf_segment_dict("h0", "Nova", "first")},
+                "outro": [{"speaker": "Max", "text": "bye"}],
+            }
+        )
+
+
+def test_generate_performance_reassembles_segments_in_order():
+    """_generate_performance must reassemble the response's per-index
+    segment_0/segment_1/... fields back into Performance.segments in the
+    same order — not, say, dict/insertion order, which JSON parsing could
+    scramble for a model that's less disciplined about key order."""
+    response_model = perform_module._response_model(2)
+    parsed = response_model.model_validate(
+        {
+            "title": "Test Episode",
+            "cold_open": [{"speaker": "Nova", "text": "hi"}],
+            "segments": {
+                "segment_0": _perf_segment_dict("h0", "Nova", "first"),
+                "segment_1": _perf_segment_dict("h1", "Max", "second"),
+            },
+            "outro": [{"speaker": "Max", "text": "bye"}],
+        }
+    )
+
+    class _FakeUsage:
+        prompt_tokens = 10
+        completion_tokens = 5
+
+    class _FakeMessage:
+        def __init__(self, parsed):
+            self.parsed = parsed
+
+    class _FakeChoice:
+        def __init__(self, parsed):
+            self.message = _FakeMessage(parsed)
+
+    class _FakeCompletion:
+        def __init__(self, parsed):
+            self.choices = [_FakeChoice(parsed)]
+            self.usage = _FakeUsage()
+
+    class _FakeCompletions:
+        def parse(self, **kwargs):
+            return _FakeCompletion(parsed)
+
+    class _FakeChat:
+        completions = _FakeCompletions()
+
+    class _FakeClient:
+        chat = _FakeChat()
+
+    performance, usage = perform_module._generate_performance(_FakeClient(), "gpt-4o", "sys", "user", 2)
+
+    assert [seg.headline for seg in performance.segments] == ["h0", "h1"]
+    assert performance.segments[0].lines[0].text == "first"
+    assert performance.segments[1].lines[0].text == "second"
+    assert usage == TokenUsage(model="gpt-4o", prompt_tokens=10, completion_tokens=5)
+
+
+def test_perform_stage_records_segment_count_repair(tmp_path, monkeypatch):
+    """The trimmed-extra-segments repair from _reconcile_segment_count
+    (see docs/decisions.md, "Correctness invariants vs quality signals")
+    is surfaced on PerformOutput.repairs, not just logged."""
+    profile = _profile()
+    episode = _episode(profile)
+    articles = [_article("abcd1234")]
+    critique_output = _critique_output(episode.episode_id, "abcd1234")
+
+    extra_segment = PerformedSegment(headline="extra", source_ids=["x"], lines=[PerformedLine(speaker="Nova", text="oops")])
+    bloated_performance = _valid_performance(extra_cold_open=False)
+    bloated_performance = bloated_performance.model_copy(update={"segments": [*bloated_performance.segments, extra_segment]})
+
+    def fake_generate_performance(client, model, system_prompt, user_prompt, segment_count):
+        return bloated_performance, _FIXTURE_USAGE
+
+    def fake_generate_fact_check(client, model, system_prompt, user_prompt):
+        return [], _FIXTURE_USAGE
+
+    monkeypatch.setattr(perform_module, "_generate_performance", fake_generate_performance)
+    monkeypatch.setattr(perform_module, "_generate_fact_check", fake_generate_fact_check)
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    output = perform_module.perform_stage(episode, critique_output, articles, client=object())
+
+    assert len(output.performance.segments) == 1
+    assert any("dropped positionally" in r for r in output.repairs)
+
+
+def test_reconcile_segment_count_drops_extra_segments_positionally():
+    """Defensive backstop, not the normal path (see _response_model) — if a
+    performance somehow still arrives with more segments than the original
+    script, the extras are dropped positionally rather than raising."""
+    original = _original_script("abcd1234")  # 1 segment
+    performance = _valid_performance(extra_cold_open=False)
+    extra_segment = PerformedSegment(headline="extra", source_ids=["x"], lines=[PerformedLine(speaker="Nova", text="oops")])
+    performance = performance.model_copy(update={"segments": [*performance.segments, extra_segment]})
+
+    reconciled, repair = perform_module._reconcile_segment_count(performance, original)
+
+    assert len(reconciled.segments) == 1
+    assert reconciled.segments[0].headline != "extra"
+    assert repair is not None
+    assert "dropped positionally" in repair
+
+
+def test_reconcile_segment_count_leaves_a_matching_count_untouched():
+    original = _original_script("abcd1234")
+    performance = _valid_performance(extra_cold_open=False)
+
+    reconciled, repair = perform_module._reconcile_segment_count(performance, original)
+
+    assert reconciled == performance
+    assert repair is None

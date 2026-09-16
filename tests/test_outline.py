@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
+from pydantic import create_model
 
 from podcast.models import (
     Angle,
@@ -212,7 +213,10 @@ def test_outline_stage_rejects_unknown_recurring_bit(tmp_path, monkeypatch):
         outline_module.outline_stage(episode, rank_output, client=object())
 
 
-def test_outline_stage_rejects_recurring_bit_over_its_max(tmp_path, monkeypatch):
+def test_outline_stage_repairs_recurring_bit_over_its_max(tmp_path, monkeypatch):
+    """A quality signal, not a correctness invariant (see docs/decisions.md,
+    "Correctness invariants vs quality signals") — the extra use is dropped
+    in code, recorded on OutlineOutput.repairs, and the run still succeeds."""
     profile = _profile(recurring_bits=[RecurringBit(name="pin-drop", description="...", max_per_episode=1)])
     episode = _episode(profile)
     articles = [_article("a1"), _article("a2")]
@@ -240,8 +244,12 @@ def test_outline_stage_rejects_recurring_bit_over_its_max(tmp_path, monkeypatch)
     )
     _patch_episode_dir(monkeypatch, tmp_path)
 
-    with pytest.raises(ValueError, match="exceeds max_per_episode"):
-        outline_module.outline_stage(episode, rank_output, client=object())
+    output = outline_module.outline_stage(episode, rank_output, client=object())
+
+    assert output.outline.stories[0].recurring_bit == "pin-drop"  # the first (earliest) use is kept
+    assert output.outline.stories[1].recurring_bit is None  # the extra use is dropped
+    assert len(output.repairs) == 1
+    assert "exceeded max_per_episode" in output.repairs[0]
 
 
 def test_outline_stage_requires_openai_api_key(tmp_path, monkeypatch):
@@ -324,18 +332,23 @@ def test_response_model_constrains_recurring_bit_to_known_ids():
         "stances": _STANCE_OBJECT,
     }
 
-    # a known id validates
-    ok = model.model_validate({"title": "t", "mood_reasons": _MOOD_REASONS_OBJECT, "stories": [{**story, "recurring_bit": "the-logistical-pin-drop"}]})
-    assert ok.stories[0].recurring_bit == "the-logistical-pin-drop"
+    # a known id validates (on first_story — the field is shared with
+    # later_stories, so testing it on either is equivalent)
+    ok = model.model_validate(
+        {"title": "t", "mood_reasons": _MOOD_REASONS_OBJECT, "first_story": {**story, "recurring_bit": "the-logistical-pin-drop"}, "later_stories": []}
+    )
+    assert ok.first_story.recurring_bit == "the-logistical-pin-drop"
 
     # null validates (no bit fits)
-    none_ok = model.model_validate({"title": "t", "mood_reasons": _MOOD_REASONS_OBJECT, "stories": [story]})
-    assert none_ok.stories[0].recurring_bit is None
+    none_ok = model.model_validate({"title": "t", "mood_reasons": _MOOD_REASONS_OBJECT, "first_story": story, "later_stories": []})
+    assert none_ok.first_story.recurring_bit is None
 
     # a paraphrased/invented id — the exact bug this fixes — is rejected at
     # the schema level, before it ever reaches _validate_outline
     with pytest.raises(ValueError):
-        model.model_validate({"title": "t", "mood_reasons": _MOOD_REASONS_OBJECT, "stories": [{**story, "recurring_bit": "logistical pin-drop"}]})
+        model.model_validate(
+            {"title": "t", "mood_reasons": _MOOD_REASONS_OBJECT, "first_story": {**story, "recurring_bit": "logistical pin-drop"}, "later_stories": []}
+        )
 
 
 def test_response_model_forces_null_when_no_bits_configured():
@@ -349,7 +362,9 @@ def test_response_model_forces_null_when_no_bits_configured():
     }
 
     with pytest.raises(ValueError):
-        model.model_validate({"title": "t", "mood_reasons": _MOOD_REASONS_OBJECT, "stories": [{**story, "recurring_bit": "anything"}]})
+        model.model_validate(
+            {"title": "t", "mood_reasons": _MOOD_REASONS_OBJECT, "first_story": {**story, "recurring_bit": "anything"}, "later_stories": []}
+        )
 
 
 def test_response_model_stances_is_an_object_with_one_required_field_per_host():
@@ -365,18 +380,134 @@ def test_response_model_stances_is_an_object_with_one_required_field_per_host():
         "angle": {"why_it_matters": "w", "tension_or_surprise": "t", "host_take": "h", "tangent": "a"},
     }
 
-    ok = model.model_validate({"title": "t", "mood_reasons": _MOOD_REASONS_OBJECT, "stories": [{**story, "stances": _STANCE_OBJECT}]})
-    assert ok.stories[0].stances.Nova.attitude == "excited"
-    assert ok.stories[0].stances.Max.attitude == "skeptical"
+    ok = model.model_validate(
+        {"title": "t", "mood_reasons": _MOOD_REASONS_OBJECT, "first_story": {**story, "stances": _STANCE_OBJECT}, "later_stories": []}
+    )
+    assert ok.first_story.stances.Nova.attitude == "excited"
+    assert ok.first_story.stances.Max.attitude == "skeptical"
 
     # missing a required host's stance — schema-level rejection, the same
     # way an invalid recurring bit id is, not left to _validate_outline alone
     missing_max = {"Nova": _STANCE_OBJECT["Nova"]}
     with pytest.raises(ValueError):
-        model.model_validate({"title": "t", "mood_reasons": _MOOD_REASONS_OBJECT, "stories": [{**story, "stances": missing_max}]})
+        model.model_validate(
+            {"title": "t", "mood_reasons": _MOOD_REASONS_OBJECT, "first_story": {**story, "stances": missing_max}, "later_stories": []}
+        )
 
 
-def test_outline_stage_rejects_a_segment_with_both_bit_and_tangent(tmp_path, monkeypatch):
+def test_response_model_requires_transition_for_every_story_except_the_first():
+    """The structural fix for "outline keeps failing validation because
+    transition is missing on later stories": first_story has no transition
+    field at all (so it can never carry one); later_stories' transition is
+    required, not nullable, so the model can no longer return null for it
+    the way it could when every story shared one Optional-transition
+    schema. See docs/decisions.md ("Structural transitions")."""
+    model = outline_module._response_model([], ["Nova", "Max"])
+
+    story = {
+        "headline": "h",
+        "source_ids": ["a"],
+        "angle": {"why_it_matters": "w", "tension_or_surprise": "t", "host_take": "h", "tangent": None},
+        "stances": _STANCE_OBJECT,
+    }
+
+    # first_story needs no transition key at all
+    ok = model.model_validate(
+        {
+            "title": "t",
+            "mood_reasons": _MOOD_REASONS_OBJECT,
+            "first_story": story,
+            "later_stories": [{**story, "transition": {"kind": "link", "text_hint": "same person"}}],
+        }
+    )
+    assert ok.later_stories[0].transition.kind == "link"
+
+    # a later story missing transition entirely is rejected at the schema
+    # level — this is the exact failure mode being fixed
+    with pytest.raises(ValueError):
+        model.model_validate({"title": "t", "mood_reasons": _MOOD_REASONS_OBJECT, "first_story": story, "later_stories": [story]})
+
+    # an invalid transition.kind is still rejected too
+    with pytest.raises(ValueError):
+        model.model_validate(
+            {
+                "title": "t",
+                "mood_reasons": _MOOD_REASONS_OBJECT,
+                "first_story": story,
+                "later_stories": [{**story, "transition": {"kind": "related", "text_hint": "x"}}],
+            }
+        )
+
+
+def test_convert_story_defaults_a_later_storys_missing_transition_to_clean_transition():
+    """Defensive fallback — _response_model's schema already makes a later
+    story's transition required, so this path shouldn't be reachable via
+    the real API, but _convert_story must default rather than raise if one
+    ever still arrives empty. A test-local model stands in for a
+    story_response that (unlike the real, structurally-required schema)
+    still allows a null transition, so this scenario can actually be
+    constructed."""
+    stance_model = create_model("LooseStanceResponse", attitude=(str, ...), why=(str, ...), arc=(str | None, None))
+    loose_later_story_model = create_model(
+        "LooseLaterStoryResponse",
+        headline=(str, ...),
+        source_ids=(list[str], ...),
+        angle=(Angle, ...),
+        recurring_bit=(str | None, None),
+        stances=(create_model("S", Nova=(stance_model, ...), Max=(stance_model, ...)), ...),
+        transition=(dict | None, None),
+    )
+    story_response = loose_later_story_model.model_validate(
+        {
+            "headline": "h",
+            "source_ids": ["a"],
+            "angle": {"why_it_matters": "w", "tension_or_surprise": "t", "host_take": "h", "tangent": None},
+            "stances": {
+                "Nova": {"attitude": "excited", "why": "w"},
+                "Max": {"attitude": "skeptical", "why": "w"},
+            },
+            "transition": None,
+        }
+    )
+
+    story = outline_module._convert_story(story_response, ["Nova", "Max"], is_first=False)
+
+    assert story.transition == outline_module._FALLBACK_TRANSITION
+    assert story.transition.kind == "clean_transition"
+
+
+def test_convert_story_leaves_the_first_storys_transition_none():
+    stance_model = create_model("LooseStanceResponse", attitude=(str, ...), why=(str, ...), arc=(str | None, None))
+    first_story_model = create_model(
+        "FirstStoryNoTransition",
+        headline=(str, ...),
+        source_ids=(list[str], ...),
+        angle=(Angle, ...),
+        recurring_bit=(str | None, None),
+        stances=(create_model("S", Nova=(stance_model, ...), Max=(stance_model, ...)), ...),
+    )
+    story_response = first_story_model.model_validate(
+        {
+            "headline": "h",
+            "source_ids": ["a"],
+            "angle": {"why_it_matters": "w", "tension_or_surprise": "t", "host_take": "h", "tangent": None},
+            "stances": {
+                "Nova": {"attitude": "excited", "why": "w"},
+                "Max": {"attitude": "skeptical", "why": "w"},
+            },
+        }
+    )
+
+    story = outline_module._convert_story(story_response, ["Nova", "Max"], is_first=True)
+
+    assert story.transition is None
+
+
+def test_outline_stage_repairs_a_segment_with_both_bit_and_tangent(tmp_path, monkeypatch):
+    """A quality signal, not a correctness invariant — the tangent is
+    dropped in code (the bit is the more specific choice), recorded on
+    OutlineOutput.repairs, and the run still succeeds. See
+    docs/decisions.md ("Correctness invariants vs quality signals")."""
     profile = _profile(recurring_bits=[RecurringBit(name="pin-drop", description="...", max_per_episode=2)])
     episode = _episode(profile)
     articles = [_article("abcd1234")]
@@ -389,7 +520,7 @@ def test_outline_stage_rejects_a_segment_with_both_bit_and_tangent(tmp_path, mon
             OutlineStory(
                 headline="Something happened",
                 source_ids=["abcd1234"],
-                angle=_angle(tangent="a real tangent"),  # tangent AND a bit — not allowed together
+                angle=_angle(tangent="a real tangent"),  # tangent AND a bit — repaired, not rejected
                 recurring_bit="pin-drop",
                 stances=_stances(),
             )
@@ -402,8 +533,148 @@ def test_outline_stage_rejects_a_segment_with_both_bit_and_tangent(tmp_path, mon
     )
     _patch_episode_dir(monkeypatch, tmp_path)
 
-    with pytest.raises(ValueError, match="both recurring_bit"):
+    output = outline_module.outline_stage(episode, rank_output, client=object())
+
+    assert output.outline.stories[0].recurring_bit == "pin-drop"  # kept
+    assert output.outline.stories[0].angle.tangent is None  # dropped
+    assert len(output.repairs) == 1
+    assert "dropped the tangent" in output.repairs[0]
+
+
+# ---- _repair_outline unit tests (Correctness invariants vs quality signals) --
+
+
+def test_repair_outline_drops_tangent_when_bit_also_present():
+    outline = Outline(
+        title="t",
+        host_moods=_host_moods(),
+        stories=[
+            OutlineStory(
+                headline="s", source_ids=["a"], angle=_angle(tangent="a real tangent"),
+                recurring_bit="pin-drop", stances=_stances(),
+            )
+        ],
+    )
+    bits = [RecurringBit(name="pin-drop", description="...", max_per_episode=2)]
+
+    repaired, repairs = outline_module._repair_outline(outline, bits)
+
+    assert repaired.stories[0].recurring_bit == "pin-drop"
+    assert repaired.stories[0].angle.tangent is None
+    assert len(repairs) == 1
+    assert "dropped the tangent" in repairs[0]
+
+
+def test_repair_outline_drops_bit_usage_beyond_max_per_episode_keeping_the_earliest():
+    outline = Outline(
+        title="t",
+        host_moods=_host_moods(),
+        stories=[
+            OutlineStory(headline="s1", source_ids=["a"], angle=_angle(tangent=None), recurring_bit="pin-drop", stances=_stances()),
+            OutlineStory(
+                headline="s2", source_ids=["b"], angle=_angle(tangent=None), recurring_bit="pin-drop",
+                stances=_stances(), transition=_transition(),
+            ),
+            OutlineStory(
+                headline="s3", source_ids=["c"], angle=_angle(tangent=None), recurring_bit="pin-drop",
+                stances=_stances(), transition=_transition(),
+            ),
+        ],
+    )
+    bits = [RecurringBit(name="pin-drop", description="...", max_per_episode=1)]
+
+    repaired, repairs = outline_module._repair_outline(outline, bits)
+
+    assert [s.recurring_bit for s in repaired.stories] == ["pin-drop", None, None]
+    assert len(repairs) == 2
+    assert all("exceeded max_per_episode" in r for r in repairs)
+
+
+def test_repair_outline_defaults_a_missing_later_transition_to_clean_transition():
+    outline = Outline(
+        title="t",
+        host_moods=_host_moods(),
+        stories=[
+            OutlineStory(headline="s1", source_ids=["a"], angle=_angle(tangent=None), stances=_stances()),
+            # a later story missing its transition — should be structurally
+            # unreachable via the real API (see _response_model/
+            # _convert_story), repaired here too as a final backstop
+            OutlineStory(headline="s2", source_ids=["b"], angle=_angle(tangent=None), stances=_stances()),
+        ],
+    )
+
+    repaired, repairs = outline_module._repair_outline(outline, recurring_bits=[])
+
+    assert repaired.stories[1].transition == outline_module._FALLBACK_TRANSITION
+    assert repaired.stories[1].transition.kind == "clean_transition"
+    assert len(repairs) == 1
+    assert "missing transition" in repairs[0]
+
+
+def test_repair_outline_returns_no_repairs_when_nothing_needs_fixing():
+    outline = Outline(
+        title="t",
+        host_moods=_host_moods(),
+        stories=[
+            OutlineStory(headline="s1", source_ids=["a"], angle=_angle(tangent=None), stances=_stances()),
+            OutlineStory(
+                headline="s2", source_ids=["b"], angle=_angle(tangent=None), stances=_stances(), transition=_transition()
+            ),
+        ],
+    )
+
+    repaired, repairs = outline_module._repair_outline(outline, recurring_bits=[])
+
+    assert repairs == []
+    assert repaired == outline
+
+
+def test_repair_outline_does_not_mutate_the_input():
+    outline = Outline(
+        title="t",
+        host_moods=_host_moods(),
+        stories=[
+            OutlineStory(
+                headline="s", source_ids=["a"], angle=_angle(tangent="a real tangent"),
+                recurring_bit="pin-drop", stances=_stances(),
+            )
+        ],
+    )
+    bits = [RecurringBit(name="pin-drop", description="...", max_per_episode=2)]
+
+    outline_module._repair_outline(outline, bits)
+
+    assert outline.stories[0].angle.tangent == "a real tangent"  # untouched
+
+
+def test_outline_stage_logs_repairs(tmp_path, monkeypatch, caplog):
+    profile = _profile(recurring_bits=[RecurringBit(name="pin-drop", description="...", max_per_episode=2)])
+    episode = _episode(profile)
+    articles = [_article("abcd1234")]
+    rank_output = _rank_output(episode.episode_id, articles)
+
+    fixture_outline = Outline(
+        title="Test Episode",
+        host_moods=_host_moods(),
+        stories=[
+            OutlineStory(
+                headline="Something happened", source_ids=["abcd1234"], angle=_angle(tangent="a real tangent"),
+                recurring_bit="pin-drop", stances=_stances(),
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        outline_module,
+        "_generate_outline",
+        lambda client, model, system_prompt, user_prompt, bit_ids, host_names, sampled_moods: (fixture_outline, _FIXTURE_USAGE),
+    )
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    with caplog.at_level(logging.INFO, logger="podcast.stages.outline"):
         outline_module.outline_stage(episode, rank_output, client=object())
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("repaired" in m and "dropped the tangent" in m for m in messages)
 
 
 def test_outline_stage_allocates_word_budget_proportional_to_score(tmp_path, monkeypatch):
@@ -757,30 +1028,29 @@ def test_outline_stage_rejects_a_transition_on_the_first_story(tmp_path, monkeyp
         outline_module.outline_stage(episode, rank_output, client=object())
 
 
-def test_outline_stage_rejects_a_missing_transition_on_a_later_story(tmp_path, monkeypatch):
-    profile = _profile()
-    episode = _episode(profile)
-    articles = [_article("a1"), _article("a2")]
-    rank_output = _rank_output(episode.episode_id, articles)
-
-    fixture_outline = Outline(
+def test_validate_outline_no_longer_requires_a_transition_on_a_later_story():
+    """The "later story must have a transition" check moved from a
+    post-hoc validation (which could only ever raise-and-retry, and was the
+    actual cause of "outline keeps failing validation because transition
+    is missing on later stories") to a structural guarantee — see
+    _response_model/_convert_story and docs/decisions.md ("Structural
+    transitions"). _validate_outline itself no longer checks this; only
+    the first story's "must have none" is still a runtime check."""
+    outline = Outline(
         title="Test Episode",
         host_moods=_host_moods(),
         stories=[
             OutlineStory(headline="Story 1", source_ids=["a1"], angle=_angle(tangent=None), stances=_stances()),
-            # Story 2 is missing a transition
+            # Story 2 has no transition — no longer rejected here; by the
+            # time a real Outline reaches _validate_outline, _convert_story
+            # has already guaranteed this can't happen.
             OutlineStory(headline="Story 2", source_ids=["a2"], angle=_angle(tangent=None), stances=_stances()),
         ],
     )
-    monkeypatch.setattr(
-        outline_module,
-        "_generate_outline",
-        lambda client, model, system_prompt, user_prompt, bit_ids, host_names, sampled_moods: (fixture_outline, _FIXTURE_USAGE),
-    )
-    _patch_episode_dir(monkeypatch, tmp_path)
 
-    with pytest.raises(ValueError, match="must have a transition"):
-        outline_module.outline_stage(episode, rank_output, client=object())
+    outline_module._validate_outline(
+        outline, known_ids={"a1", "a2"}, recurring_bits=[], host_names=["Nova", "Max"]
+    )  # does not raise
 
 
 def test_outline_stage_accepts_link_and_clean_transition_and_logs_them(tmp_path, monkeypatch, caplog):
@@ -827,33 +1097,6 @@ def test_outline_stage_accepts_link_and_clean_transition_and_logs_them(tmp_path,
     messages = [r.getMessage() for r in caplog.records]
     assert any("link" in m and "same company as Story 1" in m for m in messages)
     assert any("clean_transition" in m and "pivot, nothing connects them" in m for m in messages)
-
-
-def test_response_model_transition_is_nullable_and_constrains_kind():
-    model = outline_module._response_model([], ["Nova", "Max"])
-
-    story = {
-        "headline": "h",
-        "source_ids": ["a"],
-        "angle": {"why_it_matters": "w", "tension_or_surprise": "t", "host_take": "h", "tangent": None},
-        "stances": _STANCE_OBJECT,
-    }
-
-    # null transition validates (e.g. the first story)
-    none_ok = model.model_validate({"title": "t", "mood_reasons": _MOOD_REASONS_OBJECT, "stories": [story]})
-    assert none_ok.stories[0].transition is None
-
-    # a valid transition validates
-    ok = model.model_validate(
-        {"title": "t", "mood_reasons": _MOOD_REASONS_OBJECT, "stories": [{**story, "transition": {"kind": "link", "text_hint": "same person"}}]}
-    )
-    assert ok.stories[0].transition.kind == "link"
-
-    # an invalid kind is rejected at the schema level
-    with pytest.raises(ValueError):
-        model.model_validate(
-            {"title": "t", "mood_reasons": _MOOD_REASONS_OBJECT, "stories": [{**story, "transition": {"kind": "related", "text_hint": "x"}}]}
-        )
 
 
 def _write_outline_json(episodes_dir: Path, episode_id: str, host_moods: list[HostMood], *, corrupt: bool = False) -> None:

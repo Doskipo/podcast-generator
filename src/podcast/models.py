@@ -465,6 +465,12 @@ class OutlineOutput(BaseModel):
     # A quality signal in its own right: a story worth grading, but not by
     # this field alone. See docs/decisions.md ("Quality metrics").
     retried: bool = False
+    # Human-readable descriptions of quality-signal issues _repair_outline
+    # fixed in code (a bit+tangent conflict, a bit over max_per_episode, a
+    # missing transition) — never a correctness invariant, never a reason
+    # this stage failed. See docs/decisions.md ("Correctness invariants vs
+    # quality signals").
+    repairs: list[str] = Field(default_factory=list)
 
 
 class Line(BaseModel):
@@ -574,6 +580,11 @@ class CritiqueOutput(BaseModel):
     terse_hosts: list[HostBrevityFlag]
     usage: list[TokenUsage] = Field(default_factory=list)
     retried: bool = False  # see OutlineOutput.retried
+    # Human-readable descriptions of caps that were still over after one
+    # regeneration attempt (catchphrase, listener-name) — style rules
+    # degrade, they don't fail the run. See OutlineOutput.repairs and
+    # docs/decisions.md ("Correctness invariants vs quality signals").
+    repairs: list[str] = Field(default_factory=list)
 
 
 class PerformedLine(BaseModel):
@@ -649,6 +660,20 @@ class PerformOutput(BaseModel):
     # stage appends a second usage entry (the fact-check call) on every
     # normal run, which would make a len(usage)>1 heuristic wrong here.
     retried: bool = False
+    # Words the final performance exceeds perform.MAX_WORD_OVERRUN's cap by;
+    # 0 = within cap. A quality signal, not a correctness invariant — an
+    # overrun gets one regeneration attempt (see perform_stage) but never
+    # fails the run; quality_stage surfaces whatever remains as a flag
+    # instead. See docs/decisions.md ("Correctness invariants vs quality
+    # signals").
+    word_overrun: int = 0
+    # Human-readable descriptions of quality-signal repairs this stage made
+    # — a segment count trimmed back to the original's (see
+    # _reconcile_segment_count), and/or the word-cap outcome (resolved by
+    # regenerating, or still over after the one attempt). See
+    # OutlineOutput.repairs and docs/decisions.md ("Correctness invariants
+    # vs quality signals").
+    repairs: list[str] = Field(default_factory=list)
 
 
 class GroundingQuality(BaseModel):
@@ -670,6 +695,17 @@ class GroundingQuality(BaseModel):
     # metrics").
     stage_retries: dict[str, bool]
     total_retries: int  # sum of stage_retries.values(), for a single at-a-glance number
+    # PerformOutput.word_overrun, copied straight through — a quality
+    # signal, not a correctness invariant, so perform_stage never fails the
+    # run over it; surfaced here instead. See docs/decisions.md
+    # ("Correctness invariants vs quality signals").
+    word_overrun: int = 0
+    # OutlineOutput.repairs + CritiqueOutput.repairs + PerformOutput.repairs,
+    # concatenated and prefixed by stage ("outline: ...", "critique: ...",
+    # "perform: ..."), so the dashboard has one place to show everything a
+    # quality signal caused code to auto-correct this episode. See
+    # docs/decisions.md ("Correctness invariants vs quality signals").
+    repairs: list[str] = Field(default_factory=list)
 
 
 class NaturalnessQuality(BaseModel):

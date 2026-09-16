@@ -415,24 +415,58 @@ def critique_stage(
         return critique
 
     def validate(critique: Critique) -> None:
-        # Grounding can only be re-checked on the script the critique would
-        # actually produce, so validation here applies it first (pure,
-        # deterministic, cheap to redo below with the validated critique).
+        # Correctness invariant only — grounding. The catchphrase and
+        # listener-name caps are quality signals (style rules), checked
+        # separately below: they degrade, they don't raise. See
+        # docs/decisions.md ("Correctness invariants vs quality signals").
         revised = _apply_critique(original_script, critique)
         validate_source_ids(revised, known_ids)
-        # Hard backstop, not just a prompt instruction — see
-        # docs/decisions.md ("Persona rigidity"): a catchphrase used twice,
-        # or at all in the cold open, forces the one retry-with-feedback
-        # rather than shipping as-is.
-        violations = _catchphrase_violations(revised, catchphrases)
-        if violations:
-            raise ValueError(f"catchphrase rule violated: {'; '.join(violations)}")
-        listener_violations = _listener_name_violations(revised, listener_name)
-        if listener_violations:
-            raise ValueError(f"listener name rule violated: {'; '.join(listener_violations)}")
 
     critique, retried = generate_with_retry(generate, validate, user_prompt, stage_name="critique")
     revised_script = _apply_critique(original_script, critique)
+
+    # Style caps: a quality signal, not a correctness invariant — get one
+    # regeneration attempt, feedback-driven like generate_with_retry's own
+    # retry, but are never allowed to fail the run. If the regeneration
+    # doesn't fully resolve them (or itself breaks grounding), the ORIGINAL
+    # critique/revised_script is kept and whatever's left is recorded on
+    # CritiqueOutput.repairs — never discarded for a version that's
+    # unverified or worse. See docs/decisions.md ("Correctness invariants
+    # vs quality signals").
+    repairs: list[str] = []
+    violations = _catchphrase_violations(revised_script, catchphrases) + _listener_name_violations(revised_script, listener_name)
+    if violations:
+        logger.warning("critique: style cap violation(s) — regenerating once: %s", "; ".join(violations))
+        retried = True
+        retry_prompt = (
+            f"{user_prompt}\n\n"
+            f"Your previous response was invalid: {'; '.join(violations)}\n"
+            "Correct this and respond again, following all the same instructions."
+        )
+        try:
+            candidate = generate(retry_prompt)
+            validate(candidate)
+        except ValueError as exc:
+            logger.warning("critique: style-cap regeneration broke a correctness invariant, keeping the original: %s", exc)
+            candidate = None
+
+        candidate_script = _apply_critique(original_script, candidate) if candidate is not None else None
+        candidate_violations = (
+            _catchphrase_violations(candidate_script, catchphrases) + _listener_name_violations(candidate_script, listener_name)
+            if candidate_script is not None
+            else violations
+        )
+        if candidate_script is not None and not candidate_violations:
+            critique, revised_script = candidate, candidate_script
+            repairs.append(f"style cap violation(s) fixed by regenerating: {'; '.join(violations)}")
+        else:
+            logger.warning(
+                "critique: still over the style cap after regenerating — keeping the revised script, "
+                "flagging in quality.json instead of failing the run: %s", "; ".join(candidate_violations)
+            )
+            repairs.append(
+                f"style cap violation(s) still present after one regeneration attempt: {'; '.join(candidate_violations)}"
+            )
 
     for host_name, phrase in catchphrases.items():
         count = sum(1 for line in flatten_lines(revised_script) if line.speaker == host_name and phrase.lower() in line.text.lower())
@@ -457,6 +491,7 @@ def critique_stage(
         terse_hosts=terse_hosts,
         usage=usage,
         retried=retried,
+        repairs=repairs,
     )
 
     out_path = episode_dir(episode.episode_id) / "critique.json"

@@ -223,7 +223,21 @@ def _response_model(bit_ids: list[str], host_names: list[str]) -> type[BaseModel
       post-hoc validation"); an object with a fixed, required key per host
       makes "exactly one stance per host" true by construction, the same
       way a Literal enum makes an invalid bit id unrepresentable.
-    _validate_outline still re-checks both afterward as a backstop."""
+    - `stories` is not one homogeneous list either, but `first_story` (its
+      own model, with no `transition` field at all) plus `later_stories`
+      (a list of a *different* model where `transition` is required, not
+      nullable). A single list[story_model] with an Optional transition
+      field let the model return null for a later story just as easily as
+      for the first one — seen in practice as "outline keeps failing
+      validation because transition is missing on later stories" (a
+      real, recurring generate_with_retry failure) — splitting the schema
+      in two makes "every story but the first must have a transition" true
+      by construction, the same way the stances object above does for
+      stances. See docs/decisions.md ("Structural transitions").
+    _validate_outline still re-checks stances/first-story-has-none
+    afterward as a backstop; _convert_story below has its own defensive
+    fallback for a later story's transition, in case one somehow still
+    arrives empty."""
     recurring_bit_type: type = (Literal[tuple(bit_ids)] | None) if bit_ids else type(None)
 
     stance_model = create_model(
@@ -236,14 +250,16 @@ def _response_model(bit_ids: list[str], host_names: list[str]) -> type[BaseModel
     # known field names at code-writing time — create_model accepts any
     # string key here even if it isn't a valid Python identifier.
     stances_model = create_model("StancesResponse", **{name: (stance_model, ...) for name in host_names})
-    story_model = create_model(
-        "OutlineStoryResponse",
+    common_story_fields = dict(
         headline=(str, ...),
         source_ids=(list[str], ...),
         angle=(Angle, ...),
         recurring_bit=(recurring_bit_type, None),
         stances=(stances_model, ...),
-        transition=(Transition | None, None),
+    )
+    first_story_model = create_model("FirstOutlineStoryResponse", **common_story_fields)
+    later_story_model = create_model(
+        "LaterOutlineStoryResponse", **common_story_fields, transition=(Transition, ...)
     )
     # mood_reasons: same "object with one required field per host name"
     # structural trick as stances_model above — the mood itself is already
@@ -253,21 +269,42 @@ def _response_model(bit_ids: list[str], host_names: list[str]) -> type[BaseModel
     return create_model(
         "OutlineResponse",
         title=(str, ...),
-        stories=(list[story_model], ...),
+        first_story=(first_story_model, ...),
+        later_stories=(list[later_story_model], ...),
         mood_reasons=(mood_reasons_model, ...),
     )
 
 
-def _convert_story(story_response: BaseModel, host_names: list[str]) -> OutlineStory:
+# Filled in for a later story whose transition somehow still arrives empty
+# (see _convert_story) — _response_model's schema already makes this
+# structurally required, so this is a defensive fallback, not the normal
+# path. Default to clean_transition, never link: the whole point of the
+# link/clean_transition split is never inventing a connection (see
+# docs/decisions.md, "Outline transitions"), and a missing transition is
+# exactly the "not sure a link is real" case that rule already says to
+# default on.
+_FALLBACK_TRANSITION = Transition(kind="clean_transition", text_hint="moving on to the next story")
+
+
+def _convert_story(story_response: BaseModel, host_names: list[str], is_first: bool) -> OutlineStory:
     """One response story -> canonical OutlineStory. Every field but
-    `stances` round-trips via dump/revalidate (same shape); `stances` needs
-    its own conversion since the response has it as an object keyed by host
-    name (see _response_model), not the canonical list[HostStance]."""
+    `stances`/`transition` round-trips via dump/revalidate (same shape);
+    `stances` needs its own conversion since the response has it as an
+    object keyed by host name (see _response_model), not the canonical
+    list[HostStance]. `transition`: the first story's response model has no
+    such field at all (so it's simply absent from `data`, and
+    OutlineStory's own `None` default applies); a later story's is
+    required by the schema, but is defaulted to _FALLBACK_TRANSITION here
+    rather than left to raise if it's ever still falsy — see
+    _response_model's docstring and docs/decisions.md ("Structural
+    transitions")."""
     stances_response = story_response.stances
     stances = [
         HostStance(host=name, **getattr(stances_response, name).model_dump()) for name in host_names
     ]
     data = story_response.model_dump(exclude={"stances"})
+    if not is_first and not data.get("transition"):
+        data["transition"] = _FALLBACK_TRANSITION.model_dump()
     return OutlineStory.model_validate({**data, "stances": [s.model_dump() for s in stances]})
 
 
@@ -283,9 +320,12 @@ def _generate_outline(
     """Boundary around the OpenAI call — the seam tests monkeypatch. Builds
     the bit_ids/host_names-constrained schema (see _response_model), then
     converts the result back to the canonical Outline via _convert_story.
-    `sampled_moods` (already decided before this call — see
-    outline_stage/_sample_moods) is combined with the model's own
-    per-host `mood_reasons` to build `Outline.host_moods`."""
+    The response's `first_story` + `later_stories` are reassembled into one
+    ordered list here — see _response_model's docstring for why they're two
+    separate fields/models rather than one homogeneous list. `sampled_moods`
+    (already decided before this call — see outline_stage/_sample_moods) is
+    combined with the model's own per-host `mood_reasons` to build
+    `Outline.host_moods`."""
     response_model = _response_model(bit_ids, host_names)
     completion = client.chat.completions.parse(
         model=model,
@@ -296,7 +336,9 @@ def _generate_outline(
         response_format=response_model,
     )
     parsed = completion.choices[0].message.parsed
-    stories = [_convert_story(story, host_names) for story in parsed.stories]
+    stories = [_convert_story(parsed.first_story, host_names, is_first=True)] + [
+        _convert_story(story, host_names, is_first=False) for story in parsed.later_stories
+    ]
     host_moods = [
         HostMood(host=name, mood=sampled_moods[name], reason=getattr(parsed.mood_reasons, name))
         for name in host_names
@@ -314,20 +356,27 @@ def _validate_outline(
     host_names: list[str],
     evergreen_ids: set[str] = frozenset(),
 ) -> None:
+    """Correctness invariants only — if any of these are wrong, the episode
+    would be grounded in something it shouldn't be, or missing a piece the
+    rest of the pipeline requires outright. Still raises, still gets
+    generate_with_retry's one retry, still fails the run if the retry
+    doesn't fix it. A recurring bit paired with a tangent, a bit used past
+    its max_per_episode, and a missing transition are deliberately NOT
+    checked here any more — those are quality signals, repaired in code by
+    _repair_outline after this passes, never raised. See docs/decisions.md
+    ("Correctness invariants vs quality signals")."""
     known_bit_ids = {bit.effective_id for bit in recurring_bits}
-    max_per_bit = {bit.effective_id: bit.max_per_episode for bit in recurring_bits}
     known_host_names = set(host_names)
 
     used_ids: set[str] = set()
-    bit_counts: dict[str, int] = {}
     for i, story in enumerate(outline.stories):
-        if i == 0:
-            if story.transition is not None:
-                raise ValueError(f"story {story.headline!r} is the first story and must not have a transition")
-        elif story.transition is None:
-            raise ValueError(
-                f"story {story.headline!r} at position {i} must have a transition (link or clean_transition)"
-            )
+        # Every story but the first having a transition is now structurally
+        # guaranteed before _validate_outline ever runs (see
+        # _response_model/_convert_story), not re-checked here — only the
+        # first story's "must have none" still needs a runtime check, since
+        # nothing in the schema stops the model handing it one anyway.
+        if i == 0 and story.transition is not None:
+            raise ValueError(f"story {story.headline!r} is the first story and must not have a transition")
 
         used_ids.update(story.source_ids)
         story_ids = set(story.source_ids)
@@ -336,15 +385,8 @@ def _validate_outline(
                 f"story {story.headline!r} mixes an evergreen primer source with a real news source "
                 f"({sorted(story_ids)}) — a primer must be its own story, never merged with news"
             )
-        if story.recurring_bit is not None:
-            if story.recurring_bit not in known_bit_ids:
-                raise ValueError(f"outline references unknown recurring bit id: {story.recurring_bit!r}")
-            bit_counts[story.recurring_bit] = bit_counts.get(story.recurring_bit, 0) + 1
-            if story.angle.tangent:
-                raise ValueError(
-                    f"story {story.headline!r} has both recurring_bit {story.recurring_bit!r} and a "
-                    "tangent — a segment may not carry both"
-                )
+        if story.recurring_bit is not None and story.recurring_bit not in known_bit_ids:
+            raise ValueError(f"outline references unknown recurring bit id: {story.recurring_bit!r}")
 
         stance_hosts = [stance.host for stance in story.stances]
         if set(stance_hosts) != known_host_names or len(stance_hosts) != len(known_host_names):
@@ -357,14 +399,56 @@ def _validate_outline(
     if unknown:
         raise ValueError(f"outline references unknown source_ids: {sorted(unknown)}")
 
-    for bit_id, count in bit_counts.items():
-        limit = max_per_bit[bit_id]
-        if count > limit:
-            raise ValueError(f"recurring bit {bit_id!r} used {count} times, exceeds max_per_episode={limit}")
-
     mood_hosts = [m.host for m in outline.host_moods]
     if set(mood_hosts) != known_host_names or len(mood_hosts) != len(known_host_names):
         raise ValueError(f"outline must have exactly one mood per host {sorted(known_host_names)}, got {mood_hosts}")
+
+
+def _repair_outline(outline: Outline, recurring_bits: list[RecurringBit]) -> tuple[Outline, list[str]]:
+    """Quality-signal issues, fixed in code and recorded rather than
+    raised — runs after _validate_outline has already confirmed the
+    outline's correctness invariants hold, so everything touched here is
+    safe to auto-correct without risking grounding or completeness. See
+    docs/decisions.md ("Correctness invariants vs quality signals").
+    - A story with both a recurring_bit and a tangent: drop the tangent,
+      keep the bit (the more specific choice) — a segment may not carry
+      both.
+    - A recurring bit used beyond its max_per_episode: drop the
+      recurring_bit label from the extra occurrence(s), in order, keeping
+      only the earliest max_per_episode.
+    - A later story with no transition: should already be structurally
+      unreachable (see _convert_story/_response_model), but repaired here
+      too as a final backstop — defaults to clean_transition.
+    Returns a new Outline (the input is never mutated) plus a list of
+    human-readable repair descriptions, for OutlineOutput.repairs."""
+    repaired = outline.model_copy(deep=True)
+    repairs: list[str] = []
+    max_per_bit = {bit.effective_id: bit.max_per_episode for bit in recurring_bits}
+
+    bit_counts: dict[str, int] = {}
+    for i, story in enumerate(repaired.stories):
+        if story.recurring_bit is not None and story.angle.tangent:
+            repairs.append(
+                f"story {story.headline!r}: had both recurring_bit {story.recurring_bit!r} and a tangent "
+                "— dropped the tangent, kept the bit"
+            )
+            story.angle = story.angle.model_copy(update={"tangent": None})
+
+        if story.recurring_bit is not None:
+            bit_counts[story.recurring_bit] = bit_counts.get(story.recurring_bit, 0) + 1
+            limit = max_per_bit.get(story.recurring_bit)
+            if limit is not None and bit_counts[story.recurring_bit] > limit:
+                repairs.append(
+                    f"story {story.headline!r}: recurring bit {story.recurring_bit!r} exceeded "
+                    f"max_per_episode={limit} — dropped from this story"
+                )
+                story.recurring_bit = None
+
+        if i > 0 and story.transition is None:
+            repairs.append(f"story {story.headline!r}: missing transition — defaulted to clean_transition")
+            story.transition = _FALLBACK_TRANSITION.model_copy()
+
+    return repaired, repairs
 
 
 def _story_score(story: OutlineStory, score_by_id: dict[str, float]) -> float:
@@ -448,6 +532,10 @@ def outline_stage(episode: Episode, rank_output: RankOutput, client: OpenAI | No
 
     outline, retried = generate_with_retry(generate, validate, user_prompt, stage_name="outline")
 
+    outline, repairs = _repair_outline(outline, profile.podcast.recurring_bits)
+    for repair in repairs:
+        logger.info("outline: repaired — %s", repair)
+
     for i, story in enumerate(outline.stories):
         if story.transition is not None:
             logger.info(
@@ -480,6 +568,7 @@ def outline_stage(episode: Episode, rank_output: RankOutput, client: OpenAI | No
         outline=outline,
         usage=usage,
         retried=retried,
+        repairs=repairs,
     )
 
     out_path = episode_dir(episode.episode_id) / "outline.json"

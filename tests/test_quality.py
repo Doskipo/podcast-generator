@@ -151,7 +151,7 @@ def _host_moods() -> list[HostMood]:
     ]
 
 
-def _outline_output_for_grounding(retried: bool = False) -> OutlineOutput:
+def _outline_output_for_grounding(retried: bool = False, repairs: list[str] | None = None) -> OutlineOutput:
     return OutlineOutput(
         episode_id="ep1",
         generated_at=datetime.now(timezone.utc),
@@ -176,10 +176,13 @@ def _outline_output_for_grounding(retried: bool = False) -> OutlineOutput:
             ],
         ),
         retried=retried,
+        repairs=repairs or [],
     )
 
 
-def _critique_output_for_grounding(n_flags: int, n_original_lines: int, retried: bool = False) -> CritiqueOutput:
+def _critique_output_for_grounding(
+    n_flags: int, n_original_lines: int, retried: bool = False, repairs: list[str] | None = None
+) -> CritiqueOutput:
     lines = [Line(speaker="Nova" if i % 2 == 0 else "Max", text=f"line {i}") for i in range(n_original_lines)]
     script = Script(title="t", cold_open=[], segments=[Segment(headline="h", source_ids=[], lines=lines)], outro=[])
     flags = [CritiqueFlag(line_index=i, issue="expository", rewritten_lines=[lines[i]]) for i in range(n_flags)]
@@ -194,10 +197,13 @@ def _critique_output_for_grounding(n_flags: int, n_original_lines: int, retried:
         over_budget_segments=[],
         terse_hosts=[],
         retried=retried,
+        repairs=repairs or [],
     )
 
 
-def _perform_output_for_grounding(n_fact_flags: int, retried: bool = False) -> PerformOutput:
+def _perform_output_for_grounding(
+    n_fact_flags: int, retried: bool = False, word_overrun: int = 0, repairs: list[str] | None = None
+) -> PerformOutput:
     fact_flags = [
         FactChangeFlag(segment_index=0, speaker="Nova", original_text="a", performed_text="b", reason="drift")
         for _ in range(n_fact_flags)
@@ -210,6 +216,8 @@ def _perform_output_for_grounding(n_fact_flags: int, retried: bool = False) -> P
         performance=Performance(title="t", cold_open=[], segments=[], outro=[]),
         fact_flags=fact_flags,
         retried=retried,
+        word_overrun=word_overrun,
+        repairs=repairs or [],
     )
 
 
@@ -223,6 +231,49 @@ def test_grounding_quality_counts_distinct_sources_across_stories():
     )
     assert grounding.source_count == 3  # a1, a2, wiki1
     assert grounding.evergreen_share == 0.5  # 1 of 2 stories is a primer
+
+
+def test_grounding_quality_surfaces_perform_outputs_word_overrun():
+    """A quality signal, not a correctness invariant — perform_stage never
+    fails the run over it (see docs/decisions.md, "Correctness invariants
+    vs quality signals"), so it's surfaced here instead, copied straight
+    from PerformOutput.word_overrun."""
+    grounding = quality_module._grounding_quality(
+        _outline_output_for_grounding(),
+        _critique_output_for_grounding(n_flags=0, n_original_lines=4),
+        _perform_output_for_grounding(n_fact_flags=0, word_overrun=37),
+        stage_retries={"outline": False, "script": False, "critique": False, "perform": False},
+    )
+    assert grounding.word_overrun == 37
+
+
+def test_grounding_quality_aggregates_repairs_across_stages_with_prefixes():
+    """OutlineOutput.repairs + CritiqueOutput.repairs + PerformOutput.repairs,
+    concatenated and prefixed by stage — so the dashboard has one place to
+    see everything a quality signal caused code to auto-correct this
+    episode. See docs/decisions.md ("Correctness invariants vs quality
+    signals")."""
+    grounding = quality_module._grounding_quality(
+        _outline_output_for_grounding(repairs=["story 'x': dropped the tangent"]),
+        _critique_output_for_grounding(n_flags=0, n_original_lines=4, repairs=["style cap violation(s) fixed by regenerating: ..."]),
+        _perform_output_for_grounding(n_fact_flags=0, repairs=["word cap exceeded by 10 word(s) — resolved by regenerating"]),
+        stage_retries={"outline": False, "script": False, "critique": False, "perform": False},
+    )
+    assert grounding.repairs == [
+        "outline: story 'x': dropped the tangent",
+        "critique: style cap violation(s) fixed by regenerating: ...",
+        "perform: word cap exceeded by 10 word(s) — resolved by regenerating",
+    ]
+
+
+def test_grounding_quality_repairs_is_empty_when_nothing_was_repaired():
+    grounding = quality_module._grounding_quality(
+        _outline_output_for_grounding(),
+        _critique_output_for_grounding(n_flags=0, n_original_lines=4),
+        _perform_output_for_grounding(n_fact_flags=0),
+        stage_retries={"outline": False, "script": False, "critique": False, "perform": False},
+    )
+    assert grounding.repairs == []
 
 
 def test_grounding_quality_computes_critique_rewrite_rate():

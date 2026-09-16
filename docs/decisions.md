@@ -1910,6 +1910,130 @@ keeping even though it barely moved) — for a 7-minute episode this gives a tar
 old 140.0 default, a negligible difference on its own. The perform cap is where the real budget
 enforcement now lives.
 
+## Structural transitions — 2026-09-16
+Outline generation kept failing validation with "story ... must have a transition (link or
+clean_transition)" — `_validate_outline` catching a later story with `transition: null` and forcing
+`generate_with_retry`'s one retry, which sometimes wasn't enough. Root cause: `_response_model`
+gave every story, first or not, the exact same schema — `transition: Transition | None = None` —
+so nothing stopped the model from returning null for a later story just as easily as for the
+first one (where null is correct). Post-hoc validation was catching a shape the schema itself
+should never have allowed, the same class of bug `docs/decisions.md` ("Structural schemas over
+post-hoc validation") already fixed once for `stances` and `recurring_bit`.
+
+Fixed the same way: split one homogeneous `stories: list[story_model]` into `first_story` (its own
+model, with no `transition` field at all) and `later_stories` (a list of a second model where
+`transition: Transition` is required, not nullable). The model can no longer omit a later story's
+transition — there's no null to return, the same way `stances_model`'s per-host required fields
+mean a model can't omit a host's stance. `_generate_outline` reassembles the two back into one
+ordered `[first_story, *later_stories]` list. `_convert_story` gained an `is_first: bool` parameter:
+for the first story, `transition` is simply absent from the dumped dict and `OutlineStory`'s own
+`None` default applies; for a later story, a still-empty transition (never expected from the real,
+now-required schema, but not raised on if it somehow happens) is defaulted in code to
+`_FALLBACK_TRANSITION` — `clean_transition`, never `link`, matching the existing "default to
+clean_transition when unsure, never invent a connection" rule. `_validate_outline` dropped the
+"later story must have a transition" check entirely (it's structurally guaranteed before
+validation ever runs now) and kept only "the first story must not have one" — nothing in the
+schema stops the model handing the first story one anyway, so that check still earns its keep.
+
+Tested both layers: `_response_model`'s schema-level requiredness (a later story missing
+`transition` is rejected before `_convert_story` ever runs) and `_convert_story`'s defensive
+default (a test-local, deliberately looser response model stands in for a story_response that
+still allows a null transition, to exercise the fallback path the real schema should make
+unreachable).
+
+## Correctness invariants vs quality signals — 2026-09-16
+Perform kept failing the whole episode for two different reasons that don't deserve the same
+response: a genuine structural break (the performance doesn't say what the reviewed script says)
+versus a length overrun (the performance says the same thing, just a bit longer than budgeted).
+Named the distinction explicitly, since it's the fix for both:
+
+- **A correctness invariant** means the episode would say something different from what critique
+  actually reviewed if left uncorrected — segment/line structure (`_validate_segment_structure`),
+  the cold-open suffix (`_validate_cold_open_suffix`), known speakers (`_validate_speakers`),
+  grounding (`_apply_grounding`/`validate_performed_source_ids`), source ids. These still raise,
+  still get `generate_with_retry`'s one retry, and still fail the run if the retry doesn't fix
+  them — nothing here changed.
+- **A quality signal** means the episode still says the right thing, just imperfectly by some
+  measurable-but-soft standard — the word cap is the one perform.py has today. It gets feedback
+  and one regeneration attempt too (the same "try once more before giving up" shape), but an
+  overrun that survives the retry is *kept*, not failed: recorded on `PerformOutput.word_overrun`
+  and surfaced through `GroundingQuality.word_overrun` in quality.json, exactly like the existing
+  quality-stage proxies. Failing an entire episode — losing every correct, well-grounded segment —
+  over a few words of padding was a worse outcome than shipping it and flagging the overrun.
+
+### Segment count: made structural, not just validated
+`perform.py:_response_model(segment_count)` — `Performance.segments` stopped being a homogeneous
+`list[PerformedSegment]` (which let the model return any number of segments; a real "performance
+has 4 segment(s), expected 3" failure was seen in practice) and became an object with one required
+field per segment index, `segment_0`..`segment_{segment_count-1}` — the same "object with a
+required key per slot" trick outline.py's stances and later-story transition already use (see
+"Structural transitions" above) to make a count true by construction instead of checked after the
+fact. `_generate_performance` reassembles the per-index fields back into `Performance.segments`,
+in order. `_reconcile_segment_count` is a defensive backstop, not the normal path — a performance
+that somehow still arrives with too many segments gets trimmed to the original's count
+(positional, drop the extras) rather than failing the run; there's no equivalent repair for too
+FEW (nothing to positionally map from), so a genuine shortfall still reaches
+`_validate_segment_structure` and still raises — segment count going down is a correctness
+problem, segment count going up (now essentially unreachable via the real API) was always just
+defensive coding.
+
+### Word cap: retried once, then kept and flagged, never failed
+The cap check itself moved out of `_validate_performance` (correctness invariants only now) into
+`_word_overrun`, which never raises — 0 means within cap. `perform_stage` checks it once after
+`generate_with_retry` returns a structurally-valid performance; if over, it regenerates once more
+using the same `generate()`/`validate()` closures (feedback in the same "your previous response
+was invalid" shape `generate_with_retry` itself uses, so the model gets one honest shot at fixing
+it) — but if the regeneration is still over cap, or itself breaks a correctness invariant, the
+ORIGINAL performance is kept rather than gambling on an unverified or worse replacement.
+`PerformOutput.retried` is set the moment a regeneration is *attempted*, not only when it
+succeeds — tokens are spent either way (the extra call's usage is recorded regardless), so
+"needed a second shot" is the honest signal, not "the second shot worked."
+
+### Extended to outline and critique
+The same split applies wherever a stage's validation was raising over something that didn't
+actually require throwing away a correct episode. Two more categories of fix, matching how
+repairable each issue is:
+
+**Outline — repaired in code, no LLM involved.** `outline.py:_repair_outline(outline,
+recurring_bits)` runs once, right after `generate_with_retry` returns an outline that's already
+passed the correctness invariants (`_validate_outline`: unknown source_ids, evergreen/news
+mixing, missing stances, the first story having a transition). It fixes three things
+deterministically, in code, no regeneration needed, because each has one obvious correct repair:
+- A story with both a `recurring_bit` and a `tangent` (not allowed together) — drop the tangent,
+  keep the bit (the more specific choice).
+- A recurring bit used beyond its `max_per_episode` — drop the `recurring_bit` label from the
+  extra occurrence(s), in order, keeping only the earliest allowed uses.
+- A later story with no transition — should already be structurally unreachable (see "Structural
+  transitions" above), repaired here too as a final backstop: defaults to `clean_transition`.
+
+`_validate_outline` dropped both the bit+tangent and the max-per-episode raises entirely — they're
+quality signals now, never a reason `outline_stage` fails. Each repair is appended as a
+human-readable string to `OutlineOutput.repairs` and logged (`outline: repaired — ...`).
+
+**Critique — style caps, same "regenerate once, then keep and flag" shape as perform's word cap.**
+The catchphrase and listener-name caps (see "Persona rigidity") moved out of the
+`generate_with_retry`-triggering `validate()` (which now checks grounding only —
+`validate_source_ids`) into a post-retry step: after a grounding-valid critique comes back,
+`critique_stage` checks both caps together; if either is violated, it regenerates once
+(feedback-driven, reusing the same `generate()`/`validate()` closures) and re-checks. If the
+regeneration resolves everything, the new critique/revised_script is adopted; if it doesn't — or
+if it breaks grounding — the ORIGINAL revised_script is kept and whatever's still violated is
+recorded on `CritiqueOutput.repairs`, never raised. `mixed_metaphor`/`listy_readout` needed no
+change: they were already judgment-only prompt instructions with no code-level check to begin
+with, so there was never a raise to remove.
+
+### `repairs: list[str]` — one place to see what code fixed
+`OutlineOutput`, `CritiqueOutput`, and `PerformOutput` each gained a `repairs: list[str]` field —
+human-readable descriptions of whatever that stage's own quality signals fixed or flagged this
+run (empty when nothing needed it). `quality_stage`'s `_grounding_quality` concatenates all three,
+prefixed by stage (`"outline: ..."`, `"critique: ..."`, `"perform: ..."`), into
+`GroundingQuality.repairs`, so quality.json — and the episode card's Quality panel, which now
+renders an "Auto-repaired" list alongside a new "Word overrun" stat — has one place to show
+everything a run silently fixed instead of failing over. Deliberately not wired into the
+dashboard's cross-episode `QualityTable`/`quality_series()` yet — a list of free-text strings
+doesn't fit a table row well, and the per-episode panel already covers "so the dashboard can show
+what was auto-repaired" for the episode someone's actually looking at.
+
 ## Future work.
 - Add **suggest topics from previous episodes** from the previous podcasts. So it generatos a topic 
 (or a bunch of topics) for a podcast for you.
