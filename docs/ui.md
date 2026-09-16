@@ -21,7 +21,7 @@ router prefix and stays at the root.
 | Path         | Page                | What it does |
 |--------------|---------------------|--------------|
 | `/settings`  | `src/pages/Settings.jsx` | Edit the profile: podcast name, listener name, duration, tone; interests (topic, Low/Medium/High weight choice, description + "Suggest" button); hosts (name, persona, voice picker); style sliders/toggles (humour, depth, tangents, banter); schedule (cron field + presets). Each section `Card` carries an icon (`lucide-react`). Save → `PUT /api/profile`. |
-| `/episodes`  | `src/pages/Episodes.jsx` | Episodes as cards (title from the script, date, duration, status, a labelled "Details" toggle), newest first, with anything older than two weeks collapsed under an "Older (N)" disclosure. "Generate now" lives in the app shell, not this page — see "Generate now" below — and dispatches a `podcast:episode-created` window event this page listens for to refresh/restart its poll. A card's "Details" expands (lazy-loads `GET /api/episodes/{id}`) into a card-styled audio player streaming `/api/episodes/{id}/audio`, show notes (source links), and the transcript (see "Transcript" below). |
+| `/episodes`  | `src/pages/Episodes.jsx` | Episodes as cards (title from the script — falls back to the date when there isn't one yet — duration, status, a labelled "Details" toggle), newest first. Mocked rows never appear (the backend excludes them — see "Episode list" below). Default view is `done`/`running`/`pending` only; `failed`/`no_content` sit behind a "Show failed / no content (N)" toggle, each set independently collapsing anything older than two weeks under its own "Older (N)" disclosure (`EpisodeList.jsx`). "Generate now" lives in the app shell, not this page — see "Generate now" below — and dispatches a `podcast:episode-created` window event this page listens for to refresh/restart its poll. A card's "Details" expands (lazy-loads `GET /api/episodes/{id}`) into the player (the card's hero — large play control, live time/progress bar, streaming `/api/episodes/{id}/audio`, see "Audio player" below) plus three collapsed-by-default disclosures, Transcript / Sources / About the hosts; a failed episode's card shows its human-readable `failure_reason` when one was recorded. |
 | `/dashboard` | `src/pages/Dashboard.jsx` | Loads `GET /api/metrics/summary` (once per `includeMocked` toggle — see docs/decisions.md, "dashboard mocked-data toggle") and renders a KPI row (episodes done/total, completion rate, D7 retention, cost/episode), three recharts charts (episodes & plays per day, cost by stage, topic distribution), and a recent-failures/no_content table. Shows a "mocked demo data" banner only in the opted-in mode. |
 
 `/` renders the same component as `/episodes` (default landing page) —
@@ -185,27 +185,45 @@ collapsed **Older (N)** disclosure, closed by default.
 
 ### Audio player
 
-`AudioPlayer.jsx` wraps the native `<audio controls>` in a `surface`-toned,
-rounded frame instead of leaving it as a bare, browser-grey box, and sets
-`accent-color`/`color-scheme` so the native scrubber/volume controls pick
-up the app's accent. This is a restyle of the native element, not a
-custom-built transport (play/pause/seek/volume) — the browser's own audio
-controls have no standard CSS hooks beyond that, and building a fully
-custom player was out of scope for a one-hour pass.
+`AudioPlayer.jsx` is the hero of an expanded episode card: a large circular
+play/pause button, the title and a `current / total` time readout next to
+it, and a full-width `<input type="range">` progress bar/scrubber beneath
+— an actual custom transport, not a restyle of the native `<audio
+controls>` element (which has no CSS hooks for this layout; see
+docs/decisions.md, "Episode card: hero player, collapsed sections", for
+why that restyle-only approach was retired). A hidden `<audio>` element
+(ref'd, not `controls`) does the real decoding/playback; the button/range
+just drive its `play()`/`pause()`/`currentTime`. `durationSeconds` (from
+the episode's own `duration_s`) seeds the displayed total before the
+audio's `loadedmetadata` fires, so the readout doesn't start at "0:00".
 
 ### Transcript
 
-`ScriptView.jsx` now takes a `hosts` prop (the two entries from
+`ScriptView.jsx` takes a `hosts` prop (the two entries from
 `profile.podcast.hosts`, fetched once by `Episodes.jsx` and passed to every
-card) and, at the top, renders each host's `HostAvatar` (initial-in-a-circle,
-coloured `accent`/`ink` by host index — always exactly two hosts, so two
-palette colours is exactly enough, see `PodcastSettings`'s
-`_validate_hosts`) next to a one-line bio: the first non-empty line of that
-host's `persona`, the same "brief, not the full paragraph" convention
-`outline.py`'s `_render_host_brief` already uses server-side. Every line
-below (cold open, each segment under its own headline, outro) repeats the
-small avatar + colour-matched speaker name, so a reader can follow who's
-talking without re-reading names.
+card) purely to colour-match speakers: every line (cold open, each segment
+under its own headline, outro) gets a small `HostAvatar`
+(initial-in-a-circle, coloured `accent`/`ink` by host index — always
+exactly two hosts, so two palette colours is exactly enough, see
+`PodcastSettings`'s `_validate_hosts`) plus a colour-matched speaker name,
+so a reader can follow who's talking without re-reading names.
+
+Host bios (avatar + a one-line persona summary — the first non-empty line
+of `persona`, the same "brief, not the full paragraph" convention
+`outline.py`'s `_render_host_brief` already uses server-side) used to be
+part of `ScriptView.jsx` itself; they're now `HostBios.jsx`, rendered in
+their own "About the hosts" disclosure on the card, independent of whether
+Transcript is open — see "Episode card" below.
+
+### Episode card: hero player, collapsed sections
+
+An expanded card's `AudioPlayer` (see above) is followed by three
+`Disclosure.jsx` sections, collapsed by default: **Transcript**
+(`ScriptView`), **Sources** (`ShowNotes` — the episode's cited articles),
+and **About the hosts** (`HostBios`). Each disclosure owns its own
+open/closed state, so opening one doesn't affect the others, and every
+card starts fully collapsed — the player is what the card leads with. See
+docs/decisions.md ("Episode card: hero player, collapsed sections").
 
 ### Settings
 

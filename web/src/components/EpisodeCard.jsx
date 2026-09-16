@@ -2,6 +2,8 @@ import { ChevronDown, ChevronUp } from 'lucide-react'
 import { useRef, useState } from 'react'
 import { api } from '../api.js'
 import AudioPlayer from './AudioPlayer.jsx'
+import Disclosure from './Disclosure.jsx'
+import HostBios from './HostBios.jsx'
 import ScriptView from './ScriptView.jsx'
 import ShowNotes from './ShowNotes.jsx'
 import StatusBadge from './StatusBadge.jsx'
@@ -52,7 +54,11 @@ export default function EpisodeCard({ episode, hosts }) {
     <div className="rounded-lg border border-ink/10 bg-surface p-4 shadow-sm">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <h3 className="truncate font-medium text-ink">{episode.title || episode.episode_id}</h3>
+          {/* No title until the script stage has run (still pending, or
+              failed before scripting) — the date stands in rather than the
+              raw episode_id. See docs/decisions.md ("Episode list: mocked,
+              status filter, resilience"). */}
+          <h3 className="truncate font-medium text-ink">{episode.title || formatDate(episode.created_at)}</h3>
           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-ink/55">
             <span>{formatDate(episode.created_at)}</span>
             {duration && <span>{duration}</span>}
@@ -62,6 +68,9 @@ export default function EpisodeCard({ episode, hosts }) {
             <p className="mt-1.5 text-xs text-ink/70">
               No fresh content this run for: {episode.no_content_interests.join(', ')}
             </p>
+          )}
+          {episode.status === 'failed' && episode.failure_reason && (
+            <p className="mt-1.5 text-xs text-ink/70">{episode.failure_reason}</p>
           )}
         </div>
         <button
@@ -81,7 +90,13 @@ export default function EpisodeCard({ episode, hosts }) {
           {detail && (
             <>
               {detail.status === 'done' && (
-                <AudioPlayer src={api.episodeAudioUrl(episode.episode_id)} onPlay={handlePlay} onEnded={handleEnded} />
+                <AudioPlayer
+                  src={api.episodeAudioUrl(episode.episode_id)}
+                  title={episode.title || formatDate(episode.created_at)}
+                  durationSeconds={episode.duration_s}
+                  onPlay={handlePlay}
+                  onEnded={handleEnded}
+                />
               )}
               {detail.status === 'no_content' && (
                 <p className="text-sm text-ink/70">
@@ -95,19 +110,32 @@ export default function EpisodeCard({ episode, hosts }) {
                   . This isn't an error — try again later, or widen that interest's window/queries in Settings.
                 </p>
               )}
-              {detail.status !== 'done' && detail.status !== 'no_content' && (
+              {detail.status === 'failed' && (
+                <p className="text-sm text-ink/70">
+                  This run failed{detail.stage_reached ? ` at the ${detail.stage_reached} stage` : ''}
+                  {detail.failure_reason && (
+                    <>
+                      : <span className="font-medium text-ink">{detail.failure_reason}</span>
+                    </>
+                  )}
+                  .
+                </p>
+              )}
+              {detail.status !== 'done' && detail.status !== 'no_content' && detail.status !== 'failed' && (
                 <p className="text-sm text-ink/55">Audio not ready yet ({detail.status}).</p>
               )}
 
-              <div>
-                <h4 className="mb-1 text-xs font-semibold uppercase tracking-wide text-ink/40">Show notes</h4>
-                <ShowNotes items={detail.show_notes} />
-              </div>
-
-              <div>
-                <h4 className="mb-1 text-xs font-semibold uppercase tracking-wide text-ink/40">Transcript</h4>
+              <Disclosure label="Transcript">
                 <ScriptView script={detail.script} hosts={hosts} />
-              </div>
+              </Disclosure>
+
+              <Disclosure label="Sources">
+                <ShowNotes items={detail.show_notes} />
+              </Disclosure>
+
+              <Disclosure label="About the hosts">
+                <HostBios hosts={hosts} />
+              </Disclosure>
             </>
           )}
         </div>

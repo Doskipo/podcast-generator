@@ -309,6 +309,50 @@ def test_aggregate_summary_combines_real_and_mocked_episodes(tmp_path, monkeypat
     assert failures["real-2"].status == "no_content"
     assert failures["real-2"].reason == "beta"
 
+
+def test_recent_failures_prefers_the_failure_reason_column_over_event_scan(tmp_path, monkeypatch):
+    _configure_test_db(monkeypatch, tmp_path)
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    now = datetime.now(timezone.utc)
+    with db.session_scope() as session:
+        session.add(db.ProfileRecord(id=1, name="Test", data={}, created_at=now, updated_at=now))
+        # has the denormalized column set (every real failure since it was
+        # added) — the event's own "error" is deliberately different, to
+        # prove the column wins, not the event scan.
+        with_column = db.EpisodeRecord(
+            episode_id="ep-with-column",
+            profile_id=1,
+            status="failed",
+            created_at=now,
+            failure_reason="OpenAI: rate limit or quota exceeded",
+        )
+        # column never set (a row that failed before failure_reason existed,
+        # or a mocked row — seed_metrics writes a "failed" event but not
+        # this column) — must fall back to the event's own error.
+        without_column = db.EpisodeRecord(episode_id="ep-without-column", profile_id=1, status="failed", created_at=now)
+        session.add(with_column)
+        session.add(without_column)
+        session.commit()
+
+        session.add(
+            db.EventRecord(
+                episode_id="ep-with-column", type="failed", ts=now, metadata_json={"stage": "outline", "error": "stale event text"}
+            )
+        )
+        session.add(
+            db.EventRecord(
+                episode_id="ep-without-column", type="failed", ts=now, metadata_json={"stage": "tts", "error": "from the event"}
+            )
+        )
+        session.commit()
+
+        summary = metrics.aggregate_summary(session)
+
+    failures = {f.episode_id: f for f in summary.recent_failures}
+    assert failures["ep-with-column"].reason == "OpenAI: rate limit or quota exceeded"
+    assert failures["ep-without-column"].reason == "from the event"
+
     # today's real/mocked rows both land on a daily_series point
     today_point = next(p for p in summary.daily_series if p.date == now.date().isoformat())
     assert today_point.episodes_created == 2  # real-1 and real-2, both created "now"

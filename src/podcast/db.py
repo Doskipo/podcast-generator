@@ -54,6 +54,15 @@ class EpisodeRecord(SQLModel, table=True):
     profile_id: int = Field(foreign_key="profiles.id")
     status: str = Field(default="pending")  # pending | running | done | failed | no_content
     stage_reached: str | None = None  # fetch|rank|outline|script|critique|tts|stitch
+    # Set whenever status becomes "failed" — a short, human-readable reason
+    # (podcast.errors.humanize_stage_error turns a raised exception into
+    # this; podcast.service.mark_interrupted_episodes writes a fixed
+    # message for a run orphaned by a server restart). The single source
+    # for both the Episodes page and the dashboard's recent-failures table
+    # — see docs/decisions.md ("Episode list: mocked, status filter,
+    # resilience"). None for every other status, and for a "failed" row
+    # persisted before this field existed.
+    failure_reason: str | None = None
     created_at: datetime
     duration_s: float | None = None
     total_characters: int | None = None
@@ -125,6 +134,7 @@ _ADDITIVE_COLUMNS: list[tuple[str, str, str]] = [
     ("episodes", "mocked", "BOOLEAN DEFAULT 0"),
     ("episodes", "mock_cost_by_stage", "JSON"),
     ("episodes", "mock_topic_counts", "JSON"),
+    ("episodes", "failure_reason", "TEXT"),
     ("events", "mocked", "BOOLEAN DEFAULT 0"),
 ]
 

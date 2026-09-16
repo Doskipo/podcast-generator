@@ -28,6 +28,7 @@ from sqlmodel import Session, select
 
 from podcast import db
 from podcast.artefacts import load_episode_manifest, new_episode_id
+from podcast.errors import humanize_stage_error
 from podcast.models import (
     Article,
     CritiqueOutput,
@@ -128,6 +129,35 @@ def upsert_profile(profile: Profile, session: Session) -> db.ProfileRecord:
 upsert_profile_from_yaml = upsert_profile
 
 
+INTERRUPTED_REASON = "Interrupted — the server restarted while this episode was still running."
+
+
+def mark_interrupted_episodes(session: Session) -> int:
+    """Called once from the API's startup lifespan (api/app.py), before
+    anything else touches the episodes table: any real (non-mocked) row
+    still `status="running"` at process start can never resolve on its own
+    — either the process crashed/was killed mid-stage, or it's a CLI
+    `--until` checkpoint (see run_episode's docstring: "leaving
+    status='running' ... the run is genuinely incomplete, not a new
+    terminal status") nobody has resumed yet. The API has no way to tell
+    those apart and, unlike the CLI's --from-* flags, exposes no resume
+    affordance at all — so from the API/UI's perspective a leftover
+    "running" row is always stuck. Marked failed via the same
+    failure_reason field/mechanism a stage exception uses (see
+    call_stage), so it surfaces identically in the Episodes page and the
+    dashboard's recent-failures table. Returns the count marked, for a
+    startup log line."""
+    rows = session.exec(
+        select(db.EpisodeRecord).where(db.EpisodeRecord.status == "running", db.EpisodeRecord.mocked.is_(False))
+    ).all()
+    for record in rows:
+        record.status = "failed"
+        record.failure_reason = INTERRUPTED_REASON
+        session.add(record)
+        emit_event(session, record.episode_id, "failed", {"stage": record.stage_reached, "error": INTERRUPTED_REASON})
+    return len(rows)
+
+
 def get_or_create_episode_record(session: Session, episode_id: str, profile_id: int) -> db.EpisodeRecord:
     row = session.exec(select(db.EpisodeRecord).where(db.EpisodeRecord.episode_id == episode_id)).first()
     if row is None:
@@ -163,11 +193,13 @@ def call_stage(
     try:
         result = fn()
     except Exception as exc:
+        reason = humanize_stage_error(exc)
         record.status = "failed"
         record.stage_reached = stage_name
+        record.failure_reason = reason
         session.add(record)
         session.commit()
-        emit_event(session, record.episode_id, "failed", {"stage": stage_name, "error": str(exc)})
+        emit_event(session, record.episode_id, "failed", {"stage": stage_name, "error": reason})
         logger.exception("episode %s: stage %s failed", record.episode_id, stage_name)
         raise
 

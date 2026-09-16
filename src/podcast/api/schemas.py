@@ -25,8 +25,9 @@ class EpisodeSummary(BaseModel):
     episode_id: str
     # The script's own title (revised_script if critique has run, else
     # script's) — None until the script stage has produced one (e.g. still
-    # pending, or failed before scripting). The UI falls back to episode_id
-    # when this is None.
+    # pending, or failed before scripting). The UI falls back to the
+    # episode's date when this is None (see docs/decisions.md, "Episode
+    # list: mocked, status filter, resilience").
     title: str | None = None
     status: str  # pending | running | done | failed | no_content
     stage_reached: str | None
@@ -39,6 +40,12 @@ class EpisodeSummary(BaseModel):
     # the Episodes UI can show it without an extra fetch. See
     # docs/decisions.md ("Grounding guard").
     no_content_interests: list[str] | None = None
+    # Set only when status == "failed": a short, human-readable reason
+    # (podcast.errors.humanize_stage_error, or a fixed message for a run
+    # interrupted by a server restart — see
+    # service.mark_interrupted_episodes). On the list itself for the same
+    # reason no_content_interests is.
+    failure_reason: str | None = None
 
 
 class ShowNoteItem(BaseModel):

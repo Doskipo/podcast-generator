@@ -12,6 +12,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
+import httpx
+import openai
 import pytest
 from sqlmodel import Session, SQLModel, create_engine, select
 
@@ -302,6 +304,7 @@ def test_run_episode_marks_failed_on_stage_exception_and_reraises(tmp_path, monk
 
     assert record.status == "failed"
     assert record.stage_reached == "outline"
+    assert record.failure_reason == "boom"
     assert len(failed_events) == 1
     assert failed_events[0].metadata_json["stage"] == "outline"
     assert failed_events[0].metadata_json["error"] == "boom"
@@ -332,6 +335,7 @@ def test_run_episode_marks_failed_when_perform_stage_raises(tmp_path, monkeypatc
 
     assert record.status == "failed"
     assert record.stage_reached == "perform"
+    assert record.failure_reason == "perform boom"
     assert len(failed_events) == 1
     assert failed_events[0].metadata_json["stage"] == "perform"
     assert failed_events[0].metadata_json["error"] == "perform boom"
@@ -477,6 +481,83 @@ def test_resume_from_critique_runs_perform_then_tts_then_stitch(tmp_path, monkey
         service.resume_from_critique(session, record, episode, critique_output, articles=[], until=None)
 
     assert calls == ["perform", "tts", "stitch"]
+
+
+def test_call_stage_humanizes_provider_errors_into_failure_reason(tmp_path, monkeypatch):
+    _configure_test_db(monkeypatch, tmp_path)
+    with db.session_scope() as session:
+        profile_id = _seed_profile(session, _profile())
+        record = service.get_or_create_episode_record(session, "ep-provider-fail", profile_id)
+
+        request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+        response = httpx.Response(429, request=request, json={"error": {"message": "you exceeded your quota"}})
+        exc = openai.RateLimitError("you exceeded your quota", response=response, body=None)
+
+        def boom():
+            raise exc
+
+        with pytest.raises(openai.RateLimitError):
+            service.call_stage(session, record, "outline", boom)
+
+        # the short, human-readable reason — not the raw SDK message — is
+        # what's persisted for the UI/dashboard to read
+        assert record.failure_reason == "OpenAI: rate limit or quota exceeded"
+        failed_event = session.exec(
+            select(db.EventRecord).where(db.EventRecord.episode_id == "ep-provider-fail", db.EventRecord.type == "failed")
+        ).one()
+        assert failed_event.metadata_json["error"] == "OpenAI: rate limit or quota exceeded"
+
+
+def test_mark_interrupted_episodes_marks_running_rows_as_failed(tmp_path, monkeypatch):
+    _configure_test_db(monkeypatch, tmp_path)
+    with db.session_scope() as session:
+        profile_id = _seed_profile(session, _profile())
+        record = service.get_or_create_episode_record(session, "ep-orphaned", profile_id)
+        record.status = "running"
+        record.stage_reached = "tts"
+        session.add(record)
+        session.commit()
+
+        count = service.mark_interrupted_episodes(session)
+        assert count == 1
+
+        session.refresh(record)
+        assert record.status == "failed"
+        assert record.stage_reached == "tts"  # untouched — where it got stuck
+        assert record.failure_reason == service.INTERRUPTED_REASON
+
+        failed_event = session.exec(
+            select(db.EventRecord).where(db.EventRecord.episode_id == "ep-orphaned", db.EventRecord.type == "failed")
+        ).one()
+        assert failed_event.metadata_json["error"] == service.INTERRUPTED_REASON
+        assert failed_event.metadata_json["stage"] == "tts"
+
+
+def test_mark_interrupted_episodes_ignores_non_running_and_mocked_rows(tmp_path, monkeypatch):
+    _configure_test_db(monkeypatch, tmp_path)
+    with db.session_scope() as session:
+        profile_id = _seed_profile(session, _profile())
+        now = datetime.now(timezone.utc)
+
+        done = db.EpisodeRecord(episode_id="ep-done", profile_id=profile_id, status="done", created_at=now)
+        pending = db.EpisodeRecord(episode_id="ep-pending", profile_id=profile_id, status="pending", created_at=now)
+        mocked_running = db.EpisodeRecord(
+            episode_id="mock-running", profile_id=profile_id, status="running", created_at=now, mocked=True
+        )
+        session.add(done)
+        session.add(pending)
+        session.add(mocked_running)
+        session.commit()
+
+        count = service.mark_interrupted_episodes(session)
+        assert count == 0
+
+        session.refresh(done)
+        session.refresh(pending)
+        session.refresh(mocked_running)
+    assert done.status == "done"
+    assert pending.status == "pending"
+    assert mocked_running.status == "running"  # mocked demo data is never touched
 
 
 def test_upsert_profile_is_idempotent(tmp_path, monkeypatch):

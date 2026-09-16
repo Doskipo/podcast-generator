@@ -16,6 +16,7 @@ profile unconditionally, seeding or not.
 
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -29,6 +30,8 @@ from sqlmodel import select
 from podcast import db, scheduler, service
 from podcast.api import routes_episodes, routes_interests, routes_metrics, routes_profile, routes_schedule, routes_voices
 from podcast.models import Profile
+
+logger = logging.getLogger(__name__)
 
 # Vite's build output (npm run build, run from web/) — not built by this app.
 WEB_DIST = Path("web") / "dist"
@@ -46,6 +49,9 @@ async def lifespan(app: FastAPI):
 
     sched = scheduler.create_scheduler()
     with db.session_scope() as session:
+        interrupted = service.mark_interrupted_episodes(session)
+        if interrupted:
+            logger.warning("startup: marked %d interrupted episode(s) as failed", interrupted)
         service.seed_profile_from_yaml_if_empty(session)  # no-op if a profile already exists
         row = session.exec(select(db.ProfileRecord)).first()
     if row is not None:

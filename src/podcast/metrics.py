@@ -327,7 +327,14 @@ def _recent_failures(episodes: list[db.EpisodeRecord], events_by_ts: list[db.Eve
         if record.status == "no_content":
             reason = ", ".join(record.no_content_interests or []) or "no candidates found for any interest"
         else:
-            reason = last_error_by_episode.get(record.episode_id)
+            # Prefer the denormalized column (set by call_stage/
+            # mark_interrupted_episodes for every failure since it was
+            # added) — falls back to the event scan for a row that failed
+            # before this field existed, or a mocked row (seed_metrics
+            # writes a "failed" event but not this column). See
+            # docs/decisions.md ("Episode list: mocked, status filter,
+            # resilience").
+            reason = record.failure_reason or last_error_by_episode.get(record.episode_id)
         results.append(
             RecentFailure(
                 episode_id=record.episode_id,

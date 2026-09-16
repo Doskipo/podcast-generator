@@ -319,3 +319,80 @@ def test_no_content_episode_is_a_non_error_state_with_the_empty_interests_listed
     with TestClient(app) as client:
         audio_resp = client.get(f"/api/episodes/{episode_id}/audio")
     assert audio_resp.status_code == 404
+
+
+def test_get_episodes_never_lists_mocked_rows(tmp_path, monkeypatch):
+    """Mocked rows (podcast seed-metrics) exist only for the dashboard —
+    see docs/decisions.md ("Episode list: mocked, status filter,
+    resilience")."""
+    _configure_test_db(monkeypatch, tmp_path)
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    with TestClient(app) as client:
+        _seed_profile(client)
+        with db.session_scope() as session:
+            real = service.get_or_create_episode_record(session, "ep-real", profile_id=1)
+            real.status = "done"
+            session.add(real)
+            mocked = service.get_or_create_episode_record(session, "mock-1", profile_id=1)
+            mocked.status = "done"
+            mocked.mocked = True
+            session.add(mocked)
+            session.commit()
+
+        list_resp = client.get("/api/episodes")
+
+    ids = [e["episode_id"] for e in list_resp.json()]
+    assert "ep-real" in ids
+    assert "mock-1" not in ids
+
+
+def test_get_episodes_surfaces_a_human_readable_failure_reason(tmp_path, monkeypatch):
+    _configure_test_db(monkeypatch, tmp_path)
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    with TestClient(app) as client:
+        _seed_profile(client)
+        with db.session_scope() as session:
+            record = service.get_or_create_episode_record(session, "ep-failed", profile_id=1)
+            record.status = "failed"
+            record.stage_reached = "tts"
+            record.failure_reason = "ElevenLabs: rate limit or quota exceeded"
+            session.add(record)
+            session.commit()
+
+        list_resp = client.get("/api/episodes")
+
+    listed = next(e for e in list_resp.json() if e["episode_id"] == "ep-failed")
+    assert listed["failure_reason"] == "ElevenLabs: rate limit or quota exceeded"
+
+
+def test_startup_marks_a_leftover_running_episode_as_failed(tmp_path, monkeypatch):
+    """The API's lifespan calls service.mark_interrupted_episodes before
+    anything else — a "running" row left over from a killed/restarted
+    process is orphaned (nothing will ever resume it via the UI), so a
+    fresh app startup must resolve it to "failed" instead of leaving it
+    stuck "running" forever. See docs/decisions.md ("Episode list: mocked,
+    status filter, resilience")."""
+    _configure_test_db(monkeypatch, tmp_path)
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    # Seed the "orphaned" row directly in the DB, as if a previous process
+    # had been killed mid-episode — no TestClient/lifespan involved yet.
+    with db.session_scope() as session:
+        profile_row = service.upsert_profile(_profile(), session)
+        record = service.get_or_create_episode_record(session, "ep-orphaned", profile_row.id)
+        record.status = "running"
+        record.stage_reached = "critique"
+        session.add(record)
+        session.commit()
+
+    # Entering TestClient(app) as a context manager runs the lifespan.
+    with TestClient(app):
+        pass
+
+    with db.session_scope() as session:
+        record = session.exec(select(db.EpisodeRecord).where(db.EpisodeRecord.episode_id == "ep-orphaned")).first()
+    assert record.status == "failed"
+    assert record.stage_reached == "critique"
+    assert record.failure_reason == service.INTERRUPTED_REASON

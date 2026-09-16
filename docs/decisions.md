@@ -1546,6 +1546,81 @@ up on `/episodes` specifically, easy to miss.
   HTML (not JSON), alongside a check that `GET /api/episodes` still returns a JSON array at its
   new address.
 
+## Episode list: mocked, status filter, resilience — 2026-09-16
+Four related fixes to the Episodes page and failure handling, found by actually looking at what
+the page (and the DB) showed after weeks of real + seeded usage:
+
+- **Mocked episodes never appear on the Episodes page.** `GET /api/episodes` now filters
+  `WHERE mocked = 0` — `podcast seed-metrics` rows exist only to give the dashboard something to
+  show on a fresh install; they have no manifests on disk and were never meant to be clickable
+  "episodes" a user could expand and expect a script/audio player from.
+- **Default view: done, running, pending. Failed/no_content behind a toggle.** A real DB
+  accumulates failed runs (a flaky feed, a bad API key while testing, a provider outage) — before
+  this, they piled up at the top of the list ahead of the episodes that actually worked. The
+  Episodes page now shows only `{done, running, pending}` by default, with everything else behind
+  a **"Show failed / no content (N)"** disclosure (closed by default, same pattern as the existing
+  "Older (N)" age-based collapse — `EpisodeList.jsx` was extracted so both the default and the
+  revealed set each get their own independent recent/older split).
+- **A title-less episode shows its date, not its raw ID.** `EpisodeSummary.title` is `None` until
+  the script stage has run (still pending, or failed before scripting) — `EpisodeCard.jsx` now
+  falls back to the formatted `created_at` date instead of the `episode_id` string, which was
+  never meant to be user-facing.
+- **Resilience #1: a leftover "running" row is resolved at API startup, not left stuck forever.**
+  `service.mark_interrupted_episodes`, called first thing in `api/app.py`'s lifespan (before
+  profile seeding): any real (non-mocked) `EpisodeRecord` still `status="running"` when the process
+  starts can never resolve on its own — either the process was killed/crashed mid-stage, or it's a
+  CLI `--until` checkpoint (`run_episode`'s own docstring: "leaving status='running' ... the run is
+  genuinely incomplete, not a new terminal status") nobody has resumed via `--from-*` yet. The API
+  has no way to tell those apart and, unlike the CLI, exposes no resume affordance at all — so from
+  the API/UI's perspective a leftover "running" row is always orphaned. Marked `failed` with a
+  fixed reason (`service.INTERRUPTED_REASON`) through the same `failure_reason` field a stage
+  exception uses. Verified against this session's own real DB: an episode left at `status="running"`
+  (stopped mid-session, never resumed) was correctly marked failed with that reason on the next
+  `podcast serve` startup. Mocked rows are explicitly excluded from this sweep — fake history is
+  never "interrupted".
+- **Resilience #2: provider errors are humanized, not dumped raw.** New `podcast/errors.py`,
+  `humanize_stage_error(exc)` — recognizes `openai.APIStatusError` (401/403/429 → "authentication
+  failed", "access denied", "rate limit or quota exceeded") and ElevenLabs'
+  `elevenlabs.core.api_error.ApiError` (same three, by `status_code`), prefixed with the provider
+  name; anything else falls back to `str(exc)`, truncated to 200 chars. `service.call_stage` calls
+  this in its except block and persists the result on a new `EpisodeRecord.failure_reason` column —
+  the single source both the Episodes page (`EpisodeCard`'s failed-status line) and the dashboard's
+  `RecentFailuresTable` now read (`metrics._recent_failures` prefers this column, falling back to
+  its old event-scan for a row that failed before this column existed, or a mocked row —
+  `seed_metrics` writes a "failed" event but not this new column).
+  - **A real discovery while verifying this against the live DB**: an actual ElevenLabs
+    quota-exhaustion failure from earlier today came back as **HTTP 401**, not 429, with
+    `body.detail.code == "quota_exceeded"` the only signal it wasn't really an auth problem — a
+    status-code-only mapping would have mislabeled a quota issue as "authentication failed —
+    check the API key". `humanize_stage_error` checks `body.detail.code`/`status` for
+    ElevenLabs specifically before falling back to the status-code table. Worth remembering: don't
+    trust a provider's HTTP status code alone to classify its own error.
+  - Existing "failed" rows from before this column existed keep whatever raw event text they
+    already had (via the fallback) — this isn't retroactive, only new failures get humanized.
+
+## Episode card: hero player, collapsed sections — 2026-09-16
+The player was one line among several inside a card's expanded "Details" (a thin wrapper around
+the native `<audio controls>`, sitting flush against always-visible Show notes/Transcript blocks)
+— nothing signalled that playing the episode is the actual point of expanding a card.
+
+- **`AudioPlayer.jsx` rebuilt as a real (if modest) custom transport**: a large circular play/pause
+  button, the title and a live `current / total` time readout next to it, and a full-width
+  `<input type="range">` progress bar/scrubber beneath — driven by a hidden `<audio>` element via a
+  ref (`play()`/`pause()`/`currentTime` writes), rather than the browser's own unstylable controls.
+  Seeded from the episode's already-known `duration_s` so the total time doesn't flash "0:00" before
+  the audio's metadata loads; `onLoadedMetadata` replaces it with the precise value. The existing
+  `onPlay`/`onEnded` analytics wiring (`played`/`completed_playback` events, still guarded so
+  `played` fires at most once per card) is unchanged — it's attached to the same native media
+  events, which fire identically whether triggered by this UI or the browser's own controls.
+- **Transcript / Sources / About the hosts are collapsed by default**, each its own
+  `Disclosure.jsx` (chevron + label button, same visual language the "Older (N)"/"Show failed"
+  toggles already use elsewhere, but not itself reused there — this is scoped to the episode card).
+  "About the hosts" is a new split: the host-avatar-and-bio block used to render unconditionally at
+  the top of `ScriptView.jsx`'s transcript; it's now `HostBios.jsx`, its own disclosure, independent
+  of whether Transcript is open.
+- Nothing else about the card (header, status badge, Details toggle, the status-filter/mocked-
+  exclusion behavior from the previous pass) changed.
+
 ## Future work.
 - Add **suggest topics from previous episodes** from the previous podcasts. So it generatos a topic 
 (or a bunch of topics) for a podcast for you.

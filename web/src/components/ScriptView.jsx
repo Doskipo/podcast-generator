@@ -1,14 +1,5 @@
 import HostAvatar, { speakerColorClass } from './HostAvatar.jsx'
 
-// First non-empty line of a host's persona — the same "brief, not the full
-// paragraph" convention outline.py's _render_host_brief uses server-side.
-function firstLine(persona) {
-  return persona
-    ?.split('\n')
-    .map((line) => line.trim())
-    .find(Boolean)
-}
-
 function Lines({ lines, hostIndex }) {
   return (
     <ol className="space-y-2">
@@ -37,20 +28,6 @@ export default function ScriptView({ script, hosts = [] }) {
   return (
     <div className="space-y-5">
       <h3 className="font-semibold text-ink">{script.title}</h3>
-
-      {hosts.length > 0 && (
-        <div className="flex flex-col gap-2 rounded-md bg-ink/5 p-3 sm:flex-row sm:gap-6">
-          {hosts.map((host, i) => (
-            <div key={host.name} className="flex items-start gap-2">
-              <HostAvatar name={host.name} index={i} />
-              <div>
-                <div className={`text-sm font-semibold ${speakerColorClass(i)}`}>{host.name}</div>
-                <p className="text-xs text-ink/60">{firstLine(host.persona)}</p>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
 
       <div>
         <h4 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-ink/40">Cold open</h4>

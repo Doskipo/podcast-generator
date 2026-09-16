@@ -56,6 +56,7 @@ def _to_summary(record: db.EpisodeRecord) -> EpisodeSummary:
         total_characters=record.total_characters,
         cost_estimate_usd=record.cost_estimate_usd,
         no_content_interests=record.no_content_interests,
+        failure_reason=record.failure_reason,
     )
 
 
@@ -116,7 +117,13 @@ def create_episode(
 
 @router.get("/episodes", response_model=list[EpisodeSummary])
 def list_episodes(session: Session = Depends(db.get_session)) -> list[EpisodeSummary]:
-    rows = session.exec(select(db.EpisodeRecord).order_by(db.EpisodeRecord.created_at.desc())).all()
+    # Mocked rows (podcast seed-metrics) exist only to give the dashboard
+    # something to show on a fresh install — they have no real artefacts on
+    # disk and never belong on the Episodes page. See docs/decisions.md
+    # ("Episode list: mocked, status filter, resilience").
+    rows = session.exec(
+        select(db.EpisodeRecord).where(db.EpisodeRecord.mocked.is_(False)).order_by(db.EpisodeRecord.created_at.desc())
+    ).all()
     return [_to_summary(r) for r in rows]
 
 
