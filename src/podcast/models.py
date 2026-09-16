@@ -162,12 +162,14 @@ class LLMSettings(BaseModel):
     # Drives outline_stage's and script_stage's word budgets (duration_minutes
     # * words_per_minute). Default is a real measurement — see
     # podcast.metrics.measured_words_per_minute and docs/decisions.md
-    # ("Measured words-per-minute") — of actual spoken pace from performed,
-    # synthesized dialogue-mode audio: below the ~150 wpm this replaced, but
-    # above this project's own ~100-110 prior guess. Re-measured (140.0,
-    # up from an earlier single-episode 135.8) as more real episodes
-    # accumulated — re-run measured_words_per_minute() again as more do.
-    words_per_minute: float = 140.0
+    # ("Measured words-per-minute", "Word budget recalibration") — of actual
+    # spoken pace from performed, synthesized dialogue-mode audio: below the
+    # ~150 wpm this replaced, but above this project's own ~100-110 prior
+    # guess. Re-measured (139.6, essentially unchanged from 140.0) across 4
+    # real episodes — re-run measured_words_per_minute() again as more
+    # accumulate. This number alone didn't explain a 9'13"-against-7-minute
+    # overrun; see perform.MAX_WORD_OVERRUN, tightened alongside this.
+    words_per_minute: float = 139.6
 
 
 class TTSSettings(BaseModel):

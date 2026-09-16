@@ -706,3 +706,179 @@ def test_critique_stage_logs_catchphrase_usage_count(tmp_path, monkeypatch, capl
 
     messages = [r.getMessage() for r in caplog.records]
     assert any("Nova" in m and "catchphrase" in m and "1 time" in m for m in messages)
+
+
+# ---- listener-name enforcement (final polish, round 2, Part 1) -------------
+
+
+def test_name_hits_is_word_boundary_and_case_insensitive():
+    lines = [Line(speaker="Nova", text="eudald asked about this, and Eudald's friend too.")]
+    # "eudald" (lowercase) and "Eudald's" (possessive) both count; a
+    # substring inside an unrelated word would not
+    assert critique_module._name_hits(lines, "Eudald") == 2
+    assert critique_module._name_hits([Line(speaker="Nova", text="Eudaldo is unrelated.")], "Eudald") == 0
+
+
+def test_listener_name_violations_flags_use_inside_a_segment():
+    script = Script(
+        title="t",
+        cold_open=[],
+        segments=[Segment(headline="h", source_ids=[], lines=[Line(speaker="Nova", text="Eudald, here's the mechanism.")])],
+        outro=[],
+    )
+    violations = critique_module._listener_name_violations(script, "Eudald")
+    assert len(violations) == 1
+    assert "segment" in violations[0] or "mid-explanation" in violations[0]
+
+
+def test_listener_name_violations_flags_repeated_use_across_cold_open_and_outro():
+    script = Script(
+        title="t",
+        cold_open=[Line(speaker="Nova", text="Hey Eudald, welcome back.")],
+        segments=[Segment(headline="h", source_ids=[], lines=[Line(speaker="Max", text="fine")])],
+        outro=[Line(speaker="Max", text="See you next time, Eudald.")],
+    )
+    violations = critique_module._listener_name_violations(script, "Eudald")
+    assert len(violations) == 1
+    assert "at most once per episode" in violations[0]
+
+
+def test_listener_name_violations_allows_a_single_cold_open_use():
+    script = Script(
+        title="t",
+        cold_open=[Line(speaker="Nova", text="Hey Eudald, welcome back.")],
+        segments=[Segment(headline="h", source_ids=[], lines=[Line(speaker="Max", text="fine")])],
+        outro=[Line(speaker="Max", text="See you next time.")],
+    )
+    assert critique_module._listener_name_violations(script, "Eudald") == []
+
+
+def test_listener_name_violations_allows_a_single_outro_sign_off_use():
+    script = Script(
+        title="t",
+        cold_open=[Line(speaker="Nova", text="Welcome back.")],
+        segments=[Segment(headline="h", source_ids=[], lines=[Line(speaker="Max", text="fine")])],
+        outro=[Line(speaker="Max", text="See you next time, Eudald.")],
+    )
+    assert critique_module._listener_name_violations(script, "Eudald") == []
+
+
+def test_build_prompts_includes_listener_name_rule_and_current_violations():
+    profile = _profile()  # listener is Eudald
+    script = Script(
+        title="t",
+        cold_open=[],
+        segments=[Segment(headline="h", source_ids=[], lines=[Line(speaker="Nova", text="Eudald, here's the mechanism.")])],
+        outro=[],
+    )
+    outline = _outline_output("ep1", "abcd1234").outline
+
+    system_prompt, _user_prompt = critique_module._build_prompts(profile, script, outline)
+
+    assert "repeated_listener_address" in system_prompt
+    assert "at most once" in system_prompt
+    assert "cold open" in system_prompt
+    assert "mid-explanation" in system_prompt or "segment" in system_prompt
+
+
+def test_critique_stage_retries_when_listener_name_rule_still_violated(tmp_path, monkeypatch):
+    """Hard backstop, not just a prompt instruction — mirrors the
+    catchphrase enforcement above."""
+    profile = _profile()
+    episode = _episode(profile)
+    articles = [_article("abcd1234")]
+    script_output = _script_output(episode.episode_id, "abcd1234")
+    # cold_open(0)="Welcome back...", segment lines(1,2), outro(3) — put the
+    # listener's name in segment line 1: an outright "mid-explanation" ban,
+    # not just a count problem
+    script_output.script.segments[0].lines[0] = Line(speaker="Nova", text="Eudald, here's the story.")
+    outline_output = _outline_output(episode.episode_id, "abcd1234")
+
+    prompts: list[str] = []
+
+    def fake_generate_critique(client, model, system_prompt, user_prompt):
+        prompts.append(user_prompt)
+        if len(prompts) == 1:
+            return Critique(flags=[]), _FIXTURE_USAGE  # leaves the violation in place
+        return (
+            Critique(
+                flags=[
+                    CritiqueFlag(
+                        line_index=1, issue="repeated_listener_address", rewritten_lines=[Line(speaker="Nova", text="Here's the story.")]
+                    )
+                ]
+            ),
+            _FIXTURE_USAGE,
+        )
+
+    monkeypatch.setattr(critique_module, "_generate_critique", fake_generate_critique)
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    output = critique_module.critique_stage(episode, script_output, articles, outline_output, client=object())
+
+    assert len(prompts) == 2
+    assert "listener name rule violated" in prompts[1]  # the validation error, fed back verbatim
+    assert output.retried is True
+    assert output.revised_script.segments[0].lines[0].text == "Here's the story."
+
+
+def test_critique_stage_raises_when_listener_name_rule_violated_twice(tmp_path, monkeypatch):
+    profile = _profile()
+    episode = _episode(profile)
+    articles = [_article("abcd1234")]
+    script_output = _script_output(episode.episode_id, "abcd1234")
+    script_output.script.cold_open = [Line(speaker="Nova", text="Hey Eudald, welcome back.")]
+    script_output.script.outro = [Line(speaker="Max", text="See you next time, Eudald.")]  # 2nd use
+    outline_output = _outline_output(episode.episode_id, "abcd1234")
+
+    prompts: list[str] = []
+
+    def fake_generate_critique(client, model, system_prompt, user_prompt):
+        prompts.append(user_prompt)
+        return Critique(flags=[]), _FIXTURE_USAGE  # never fixes the repeated use
+
+    monkeypatch.setattr(critique_module, "_generate_critique", fake_generate_critique)
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    with pytest.raises(ValueError, match="listener name rule violated"):
+        critique_module.critique_stage(episode, script_output, articles, outline_output, client=object())
+
+    assert len(prompts) == 2  # exactly one retry, no more
+
+
+def test_critique_stage_logs_listener_name_usage_count(tmp_path, monkeypatch, caplog):
+    profile = _profile()
+    episode = _episode(profile)
+    articles = [_article("abcd1234")]
+    script_output = _script_output(episode.episode_id, "abcd1234")
+    script_output.script.outro = [Line(speaker="Max", text="See you next time, Eudald.")]
+    outline_output = _outline_output(episode.episode_id, "abcd1234")
+
+    monkeypatch.setattr(
+        critique_module,
+        "_generate_critique",
+        lambda client, model, system_prompt, user_prompt: (Critique(flags=[]), _FIXTURE_USAGE),
+    )
+    _patch_episode_dir(monkeypatch, tmp_path)
+
+    with caplog.at_level(logging.INFO, logger="podcast.stages.critique"):
+        critique_module.critique_stage(episode, script_output, articles, outline_output, client=object())
+
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("Eudald" in m and "listener name" in m and "1 time" in m for m in messages)
+
+
+# ---- mixed_metaphor / listy_readout (final polish, round 2) ----------------
+
+
+def test_build_prompts_includes_mixed_metaphor_and_listy_readout_criteria():
+    profile = _profile()
+    script = _script("abcd1234")
+    outline = _outline_output("ep1", "abcd1234").outline
+
+    system_prompt, _user_prompt = critique_module._build_prompts(profile, script, outline)
+
+    assert "mixed_metaphor" in system_prompt
+    assert "single strongest comparison" in system_prompt
+    assert "listy_readout" in system_prompt
+    assert "reaction and interpretation" in system_prompt

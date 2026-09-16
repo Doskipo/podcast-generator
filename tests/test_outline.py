@@ -698,6 +698,24 @@ def test_build_prompts_includes_moods_and_tendency_framing():
     assert "not a script of fixed lines to reuse" in system_prompt
 
 
+def test_build_prompts_includes_home_turf_not_a_quota_framing():
+    profile = _profile()
+
+    system_prompt, _ = outline_module._build_prompts(profile, [_article("news1")], _SAMPLED_MOODS)
+
+    assert "not a checklist of subjects" in system_prompt
+    assert "never force a pet subject" in system_prompt
+
+
+def test_build_prompts_reinforces_clean_transition_for_unrelated_items():
+    profile = _profile()
+
+    system_prompt, _ = outline_module._build_prompts(profile, [_article("news1")], _SAMPLED_MOODS)
+
+    assert "Sharing only a broad topic or category is not a genuine connection" in system_prompt
+    assert "clean_transition between them" in system_prompt
+
+
 def test_outline_stage_refuses_zero_selected_articles(monkeypatch):
     profile = _profile()
     episode = _episode(profile)

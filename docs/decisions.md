@@ -1840,6 +1840,76 @@ afterward exactly as if typed by hand. The persona textarea's placeholder text a
 old "...speech pattern, catchphrase..." wording, consistent with the tendencies-not-fixed-lines
 framing above.
 
+## Listener address, home turf as character not quota, mixed metaphors, listy readouts, and a tighter word budget — 2026-09-16
+Four more fixes from listening back to real episodes, landing together with the same
+"prompt instruction + hard backstop where the rule is actually checkable" split the persona
+rigidity work above already established.
+
+### Listener name: at most once, never mid-explanation
+Same mechanism as the catchphrase cap (`critique.py:_catchphrase_violations`), generalized: the
+listener's name is checked, not declared — every profile has one, so there's nothing to parse out
+of persona text first. `_name_hits(lines, name)` is a word-boundary, case-insensitive count (so
+"Eudald" doesn't false-positive inside "Eudaldo"); `_listener_name_violations(script, name)`
+flags two independent things: (1) the name used more than once anywhere in the episode, and (2)
+the name used inside any segment at all — a "mid-explanation" use is never allowed regardless of
+count, only the cold open or a warm outro sign-off may use it, and even there at most once total.
+Wired identically to the catchphrase mechanism: a `repeated_listener_address` issue in the
+critique prompt (with a computed "here's what's wrong right now" block when a violation already
+exists), and a hard backstop in `critique_stage`'s `validate()` that forces the one
+retry-with-feedback if the revised script still breaks either rule. The listener's *facts* are
+untouched by any of this — script.py's existing "only state something about the listener if it's
+explicitly given" rule already scopes what a tangent/analogy can draw on; this change is only
+about how often (and where) the hosts say the listener's name out loud, not about narrowing what
+they know.
+
+### Home turf describes character, not a subject quota
+One instruction, added verbatim to outline, script, and perform's system prompts, right next to
+each stage's existing "persona describes tendencies, not fixed lines" sentence (the two ideas are
+the same mistake — treating a descriptive field as a literal requirement): home turf shapes *how*
+a host engages with a story (their angle, their reaction, an analogy they'd reach for), never
+which subjects must be worked in. Added to perform's prompt too, for consistency, even though
+perform can't add new subject matter (a hard rule already forbids changing what a line says) — the
+risk there is narrower (an emphasis/delivery choice manufacturing false enthusiasm for a pet
+subject a line doesn't actually engage with), but the framing is the same.
+
+### mixed_metaphor and listy_readout: prompt-only, no hard backstop
+Two new critique issue labels, `mixed_metaphor` (an analogy blending two or more unrelated
+comparison domains — rewrite down to the single strongest one) and `listy_readout` (a segment
+covering a set of announcements/results reading as a flat enumeration instead of hosts reacting to
+and interpreting them). Unlike the catchphrase/listener-name caps, neither gets a hard validation
+backstop: both are semantic judgments ("are these two comparison domains actually unrelated," "does
+this read like reaction or like a list") that can't be checked with a deterministic string match
+the way a declared catchphrase or a listener's name can. `critique_stage`'s `validate()` only
+gates on what code can actually verify — these two rely on the model catching itself on retry via
+the same prompt instruction, same as `robotic`/`expository`/`breaks_persona` and every other
+judgment-only criterion already in the list.
+
+### The "F1-style segment problem": clean_transition reinforcement
+Restated, more concretely, in outline's existing transition instruction (`docs/decisions.md`,
+"Outline transitions" — the rule already existed: default to `clean_transition` unless a link is
+genuine). A real episode had forced a `link` between two segments that only shared a broad
+category — separate results from unrelated events, not a genuine shared mechanism/person/tension —
+so the instruction now names that failure mode directly: *"Sharing only a broad topic or category
+is not a genuine connection — a set of separate results or announcements... must use
+clean_transition between them even though they're topically adjacent."* Concrete counter-examples
+travel better in a system prompt than an abstract rule restated more emphatically.
+
+### Word budget recalibration
+Re-ran `measured_words_per_minute()` (`podcast/metrics.py`) against every completed episode with a
+perform stage — 4 qualifying episodes now (up from 2), **139.6 wpm** (5,295 words / 37.92 minutes),
+essentially unchanged from the existing 140.0 default. That's the tell: the reported 9'13"-against-
+a-7-minute overrun wasn't a words-per-minute miscalibration at all — `LLMSettings.words_per_minute`
+was already close to right. The actual lever is `perform.MAX_WORD_OVERRUN`, tightened from **0.10
+to 0.05**: the performed script (cold-open chit-chat, spoken-list expansion, etc.) was allowed to
+run up to 10% longer than the already-budgeted critique script, and that headroom compounding on
+top of an already-generous budget is what actually pushed a 7-minute target past 9 minutes.
+Updated `LLMSettings.words_per_minute` to 139.6 anyway (a real, current measurement is still worth
+keeping even though it barely moved) — for a 7-minute episode this gives a target of
+`round(7 * 139.6)` = **977 words**, or **857 words** split across stories after
+`COLD_OPEN_OUTRO_RESERVE_WORDS` (120) is reserved for the cold open/outro — versus 980/860 at the
+old 140.0 default, a negligible difference on its own. The perform cap is where the real budget
+enforcement now lives.
+
 ## Future work.
 - Add **suggest topics from previous episodes** from the previous podcasts. So it generatos a topic 
 (or a bunch of topics) for a podcast for you.

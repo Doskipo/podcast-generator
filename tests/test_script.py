@@ -362,6 +362,17 @@ def test_build_prompts_includes_moods_and_tendency_framing():
     assert "not a script of fixed lines to reuse" in system_prompt
 
 
+def test_build_prompts_includes_home_turf_not_a_quota_framing():
+    profile = _profile()
+    outline_output = _outline_output("ep1", "abcd1234")
+    articles = [_article("abcd1234")]
+
+    system_prompt, _user_prompt = script_module._build_prompts(profile, outline_output.outline, articles)
+
+    assert "not a checklist of subjects" in system_prompt
+    assert "never force a pet subject" in system_prompt
+
+
 def test_build_prompts_omits_mood_line_when_outline_has_no_host_moods():
     """An outline.json persisted before host_moods existed (defaults to
     []) must not crash script prompt-building — the mood line is simply

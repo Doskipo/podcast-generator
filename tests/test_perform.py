@@ -91,7 +91,12 @@ def _original_script(source_id: str) -> Script:
                 ],
             )
         ],
-        outro=[Line(speaker="Max", text="See you next time.")],
+        # Long enough (not just "See you next time.") that the mandatory
+        # cold-open chit-chat line _valid_performance adds still fits inside
+        # the 5% word cap — a short fixture and a percentage cap don't mix
+        # well at these tiny word counts, so this outro carries the headroom
+        # instead of the more heavily-asserted-on cold_open/segment lines.
+        outro=[Line(speaker="Max", text="See you next time, thanks so much for tuning in today, it means a lot.")],
     )
 
 
@@ -311,7 +316,7 @@ def test_perform_stage_rejects_performance_over_word_cap(tmp_path, monkeypatch):
     critique_output = _critique_output(episode.episode_id, "abcd1234")
 
     bad_performance = _valid_performance(extra_cold_open=False)
-    # pad one line's text far past the +10% word cap, structure untouched
+    # pad one line's text far past the +5% word cap, structure untouched
     bad_performance.segments[0].lines[0] = PerformedLine(speaker="Nova", text="So get THIS — " + "padding " * 20)
 
     _patch_generation(monkeypatch, bad_performance)
@@ -354,7 +359,7 @@ def test_perform_stage_retries_when_over_word_cap_then_succeeds(tmp_path, monkey
     assert output.retried is True
 
 
-def test_validate_word_cap_rejects_over_10_percent_overrun():
+def test_validate_word_cap_rejects_over_5_percent_overrun():
     original = _original_script("abcd1234")
     performance = _valid_performance(extra_cold_open=False)
     performance.segments[0].lines[0] = PerformedLine(speaker="Nova", text="So get THIS — " + "padding " * 20)
@@ -363,7 +368,7 @@ def test_validate_word_cap_rejects_over_10_percent_overrun():
         perform_module._validate_word_cap(performance, original)
 
 
-def test_validate_word_cap_accepts_within_10_percent():
+def test_validate_word_cap_accepts_within_5_percent():
     original = _original_script("abcd1234")
     performance = _valid_performance(extra_cold_open=False)
 
@@ -519,6 +524,16 @@ def test_build_performance_prompts_includes_moods_and_tendency_framing():
     assert "Mood this episode: playful — today's stories lean silly" in system_prompt
     assert "Mood this episode: tired-but-sharp — up late double-checking a stat" in system_prompt
     assert "not a script of fixed lines to reuse" in system_prompt
+
+
+def test_build_performance_prompts_includes_home_turf_not_a_quota_framing():
+    profile = _profile()
+    original = _original_script("abcd1234")
+
+    system_prompt, _user_prompt = perform_module._build_performance_prompts(profile, original, _host_moods())
+
+    assert "not a subject checklist" in system_prompt
+    assert "pet subject" in system_prompt
 
 
 def test_build_performance_prompts_omits_mood_line_when_no_host_moods():

@@ -50,9 +50,10 @@ logger = logging.getLogger(__name__)
 # Performance rewriting (flow punctuation, spoken lists, cold-open
 # chit-chat) may lengthen the script somewhat, but must not turn into
 # padding — the total word count (across cold_open + segments + outro) may
-# exceed the critique script's own word count by at most this fraction. See
-# docs/decisions.md ("Measured words-per-minute").
-MAX_WORD_OVERRUN = 0.10
+# exceed the critique script's own word count by at most this fraction.
+# Tightened from 0.10 to 0.05 after a real episode ran 9'13" against a
+# 7-minute target — see docs/decisions.md ("Word budget recalibration").
+MAX_WORD_OVERRUN = 0.05
 
 
 def flatten_performed_lines(performance: Performance) -> list[PerformedLine]:
@@ -98,6 +99,9 @@ def _build_performance_prompts(profile: Profile, script: Script, host_moods: lis
         f"Hosts:\n{persona_block}\n\n"
         "Each host's persona describes their tendencies and voice — background, general "
         "speech patterns, what they gravitate to — not a script of fixed lines to reuse. "
+        "The same goes for home turf: it's character and taste, not a subject checklist — "
+        "don't let delivery manufacture extra excitement or emphasis for a host's pet "
+        "subject in a line that doesn't actually engage with it. "
         "Draw on the persona and on the mood given above to shape delivery, pacing, and "
         "energy for that host throughout — never to change what a line says or means.\n\n"
         "Hard rules:\n"

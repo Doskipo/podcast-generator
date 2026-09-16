@@ -1,6 +1,8 @@
 """Critique stage: review the written script for lines that are robotic,
-expository, break persona, invent listener detail, misattribute a source, or
-run too long — and rewrite (or split) only those.
+expository, break persona, invent listener detail, misattribute a source,
+run too long, overuse a catchphrase or the listener's name, blend two
+metaphors into one analogy, or read a list of facts flatly instead of
+reacting to them — and rewrite (or split) only those.
 
 Typed input: Episode (+ Profile snapshot), ScriptOutput, the ranked articles
 (to re-check grounding on the revised script), and OutlineOutput (for each
@@ -151,6 +153,38 @@ def _catchphrase_violations(script: Script, catchphrases: dict[str, str]) -> lis
     return violations
 
 
+def _name_hits(lines: list[Line], name: str) -> int:
+    """Word-boundary, case-insensitive count of `name` across `lines` — used
+    for the listener-name cap so a name doesn't false-positive as a
+    substring of an unrelated word."""
+    pattern = re.compile(rf"\b{re.escape(name)}\b", re.IGNORECASE)
+    return sum(len(pattern.findall(line.text)) for line in lines)
+
+
+def _listener_name_violations(script: Script, listener_name: str) -> list[str]:
+    """Human-readable descriptions of every listener-name rule break in
+    `script` — at most once across the whole episode, and never inside a
+    segment (a "mid-explanation" use); only the cold open or the outro (a
+    warm sign-off) may use it. Used both to steer the critique prompt and,
+    unconditionally, as critique_stage's hard validation backstop — the
+    same "prompt instruction + hard backstop" pattern as
+    _catchphrase_violations. See docs/decisions.md ("Persona rigidity")."""
+    segment_hits = sum(_name_hits(segment.lines, listener_name) for segment in script.segments)
+    total_hits = _name_hits(script.cold_open, listener_name) + segment_hits + _name_hits(script.outro, listener_name)
+
+    violations: list[str] = []
+    if total_hits > 1:
+        violations.append(
+            f'the listener\'s name ("{listener_name}") is used {total_hits} times — at most once per episode'
+        )
+    if segment_hits:
+        violations.append(
+            f'the listener\'s name ("{listener_name}") is used inside a segment (mid-explanation) — only the '
+            "cold open or a warm sign-off (the outro) may use it"
+        )
+    return violations
+
+
 def _build_prompts(profile: Profile, script: Script, outline: Outline) -> tuple[str, str]:
     persona_block = "\n\n".join(f"{host.name}:\n{host.persona}" for host in profile.podcast.hosts)
     listener = profile.podcast.listener
@@ -194,6 +228,21 @@ def _build_prompts(profile: Profile, script: Script, outline: Outline) -> tuple[
         else ""
     )
 
+    listener_name_line = (
+        f'Listener name rule: "{listener.name}" may be used at most once across the whole episode, and '
+        "never inside a segment (mid-explanation) — only the cold open or a warm sign-off in the outro "
+        "may use it. Flag a violation with issue \"repeated_listener_address\" and rewrite it to draw on "
+        "what's known about the listener implicitly (their facts may still shape an angle or an analogy) "
+        "without naming them again.\n"
+    )
+    listener_name_violations = _listener_name_violations(script, listener.name)
+    listener_name_violation_line = (
+        f"These listener-name rule violations exist right now and must be fixed: "
+        f"{'; '.join(listener_name_violations)}.\n"
+        if listener_name_violations
+        else ""
+    )
+
     system_prompt = (
         "You are a script editor for a two-host podcast, reviewing a draft for how it "
         "will sound spoken out loud.\n\n"
@@ -212,11 +261,19 @@ def _build_prompts(profile: Profile, script: Script, outline: Outline) -> tuple[
         "no mid-line tone shift, too clean and complete to be something a person just said\n"
         "- too_long: see below\n"
         "- repeated_correct: see below\n"
-        "- repeated_catchphrase: see below\n\n"
+        "- repeated_catchphrase: see below\n"
+        "- repeated_listener_address: see below\n"
+        "- mixed_metaphor: an analogy blends two or more unrelated comparison domains into one "
+        "line — rewrite it down to the single strongest comparison, dropping the rest\n"
+        "- listy_readout: a segment covering a set of announcements, results, or similar facts "
+        "reads as a flat enumeration instead of the hosts reacting to and interpreting them — "
+        "rewrite as back-and-forth reaction and interpretation, not a list read aloud\n\n"
         f"{over_length_line}"
         f"{repeated_correct_line}"
         f"{catchphrase_declared_line}"
-        f"{catchphrase_violation_line}\n"
+        f"{catchphrase_violation_line}"
+        f"{listener_name_line}"
+        f"{listener_name_violation_line}\n"
         "For each flagged line, give its index (as shown in the numbered script below), "
         "an issue label, and rewritten_lines — normally a single rewritten line that fixes "
         "it while keeping the same meaning, speaker, and any facts it cites, but for a "
@@ -345,6 +402,7 @@ def critique_stage(
     system_prompt, user_prompt = _build_prompts(profile, original_script, outline)
     known_ids = {a.source_id for a in articles}
     catchphrases = _declared_catchphrases(profile.podcast.hosts)
+    listener_name = profile.podcast.listener.name
 
     # See outline.py's outline_stage for why this is a local accumulator
     # rather than a tuple threaded through generate_with_retry: a rejected
@@ -369,6 +427,9 @@ def critique_stage(
         violations = _catchphrase_violations(revised, catchphrases)
         if violations:
             raise ValueError(f"catchphrase rule violated: {'; '.join(violations)}")
+        listener_violations = _listener_name_violations(revised, listener_name)
+        if listener_violations:
+            raise ValueError(f"listener name rule violated: {'; '.join(listener_violations)}")
 
     critique, retried = generate_with_retry(generate, validate, user_prompt, stage_name="critique")
     revised_script = _apply_critique(original_script, critique)
@@ -376,6 +437,9 @@ def critique_stage(
     for host_name, phrase in catchphrases.items():
         count = sum(1 for line in flatten_lines(revised_script) if line.speaker == host_name and phrase.lower() in line.text.lower())
         logger.info("critique: %s catchphrase %r used %d time(s) this episode", host_name, phrase, count)
+
+    listener_uses = _name_hits(flatten_lines(revised_script), listener_name)
+    logger.info("critique: listener name %r used %d time(s) this episode", listener_name, listener_uses)
 
     total_words = sum(len(line.text.split()) for line in flatten_lines(revised_script))
     over_budget_segments = _budget_flags(outline, revised_script)
